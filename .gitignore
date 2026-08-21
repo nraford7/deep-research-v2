@@ -40,5 +40,5 @@ deep-research.toml
 # Local rollback substrate — never publish (holds a copy of the live config)
 config-backups/
 
-# Internal /do-it process docs — kept on disk, never published (contain local absolute paths)
+# Internal build/process docs — kept on disk, not published (contain local absolute paths)
 docs/
