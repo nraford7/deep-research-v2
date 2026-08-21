@@ -1,7 +1,7 @@
 # Deep Research — provider/agent config example. Copy this to ./deep-research.toml or
 # ~/.config/deep-research/config.toml and fill in your keys. The COPY holds secrets and
 # is gitignored; do NOT put real keys in this example file.
-# Augments ~/.env: built-in providers (claude/chatgpt/perplexity/gemini/grok) still work
+# Augments ~/.env: built-in providers (claude/chatgpt/gemini/grok) still work
 # from env keys; entries here add or override providers and remap agent types.
 #
 # MODEL-ID DRIFT: provider model IDs change. Always verify the current ID on the
@@ -57,8 +57,8 @@ extra_args   = ["--allowedTools", "WebSearch", "Bash(curl:*)"]
 capabilities = ["web_search"]                     # marks it real-time-eligible
 
 # One-off calls (Round 0 scoping, future synthesis) — pick a cheap/subscription
-# provider. Avoid a web-search provider like Perplexity here: its per-search cost
-# is wasted on the trivial JSON call scope.py makes.
+# provider. Avoid a metered web-search provider here: its per-search cost is wasted
+# on the trivial JSON call scope.py makes.
 [defaults]
 utility = "claude-sub"     # provider for one-off calls (scoping). Falls back to
                            # claude-sub → claude → chatgpt → any available provider.
@@ -73,9 +73,9 @@ provider = "claude-sub"    # subscription — free; strong long-form analytical 
 # uses built-in chatgpt default if OPENAI_API_KEY is set
 
 [agents.real-time]
-provider = "claude-sub"    # free web search via subscription
-                            # note: perplexity sonar-deep-research is still stronger
-                            # for live research; this is the $0 alternative
+provider = "claude-sub"    # free web search via subscription — the $0 way to give the
+                            # real-time agent live search (Round-1 retrieval itself is
+                            # Exa slices, so this agent is a supplement, not the anchor)
 
 [agents.grey-literature]
 provider = "deepseek"

@@ -12,18 +12,22 @@ def test_builtin_agent_types_present():
     assert config.BUILTIN_AGENT_TYPES["academic"].requires_web_search is False
 
 def test_default_pairing_and_specs():
+    # real-time leaves DEFAULT_PAIRING — no built-in ships web_search, so it degrades
+    # by default (or resolves to a user-configured TOML web-search provider).
     assert config.DEFAULT_PAIRING == {
-        "academic": "claude", "practitioner": "chatgpt", "real-time": "perplexity",
+        "academic": "claude", "practitioner": "chatgpt",
         "grey-literature": "gemini", "contrarian": "grok",
     }
-    perp = config.BUILTIN_PROVIDER_SPECS["perplexity"]
-    assert "web_search" in perp["capabilities"]
-    assert "searches_per_run" in perp["pricing"]
+    # perplexity built-in is gone; four built-ins remain
+    assert set(config.BUILTIN_PROVIDER_SPECS) == {"claude", "chatgpt", "gemini", "grok"}
+    assert "perplexity" not in config.BUILTIN_PROVIDER_SPECS
     assert config.BUILTIN_PROVIDER_SPECS["claude"]["api_type"] == "anthropic"
     assert config.BUILTIN_PROVIDER_SPECS["gemini"]["api_type"] == "gemini"
 
 def test_default_pairing_covers_every_builtin_agent_type():
-    assert set(config.DEFAULT_PAIRING) == set(config.BUILTIN_AGENT_TYPES)
+    # pairing keys are a SUBSET of agent types (real-time is an agent type but has no
+    # default provider now that perplexity is gone).
+    assert set(config.DEFAULT_PAIRING) <= set(config.BUILTIN_AGENT_TYPES)
 
 def test_default_pairing_targets_exist_in_provider_specs():
     assert set(config.DEFAULT_PAIRING.values()) <= set(config.BUILTIN_PROVIDER_SPECS)
@@ -33,7 +37,7 @@ def test_load_config_no_toml_uses_builtins_from_env():
     providers, agents = config.load_config(toml_paths=[], env={"ANTHROPIC_API_KEY": "sk-a", "OPENAI_API_KEY": "sk-o"})
     assert set(providers) == {"claude", "chatgpt"}                 # only those with keys
     assert providers["claude"].api_key == "sk-a"
-    assert set(agents) == set(config.BUILTIN_AGENT_TYPES)          # all 5 agent types always present
+    assert set(agents) == set(config.BUILTIN_AGENT_TYPES)          # all agent types always present
 
 def test_load_config_toml_inline_and_env_ref(tmp_path):
     p = tmp_path / "deep-research.toml"
@@ -104,10 +108,15 @@ def test_assign_explicit_mapping_wins():
     assert a == {"academic": "glm"} and warns == []
 
 def test_assign_default_pairing_when_available():
-    providers = {n: _prov(n) for n in ["claude", "chatgpt", "perplexity", "gemini", "grok"]}
-    providers["perplexity"] = _prov("perplexity", capabilities=("web_search",))
-    a, _ = config.assign(config.BUILTIN_AGENT_TYPES, providers, seed=0)
-    assert a == config.DEFAULT_PAIRING
+    # Four built-in providers available; each non-real-time agent lands on its DEFAULT_PAIRING
+    # provider. real-time has no default (perplexity gone) and no web_search provider here,
+    # so it round-robins onto a plain provider with a warning.
+    providers = {n: _prov(n) for n in ["claude", "chatgpt", "gemini", "grok"]}
+    a, warns = config.assign(config.BUILTIN_AGENT_TYPES, providers, seed=0)
+    for agent, provider in config.DEFAULT_PAIRING.items():
+        assert a[agent] == provider
+    assert a["real-time"] in providers                       # degraded onto some provider
+    assert any("web search" in w.lower() for w in warns)     # and warned about it
 
 def test_assign_single_provider_absorbs_all_five():
     providers = {"ds": _prov("ds", capabilities=("web_search",))}

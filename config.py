@@ -126,9 +126,11 @@ BUILTIN_AGENT_TYPES: dict[str, AgentType] = {
 DEFAULT_PAIRING: dict[str, str] = {
     "academic": "claude",
     "practitioner": "chatgpt",
-    "real-time": "perplexity",
     "grey-literature": "gemini",
     "contrarian": "grok",
+    # No built-in ships `web_search`, so the `real-time` agent has no default pairing:
+    # it degrades to knowledge-cutoff results unless the user configures a TOML
+    # web-search provider (Round-1 live retrieval is Exa slices, not the agent).
 }
 
 # Spec templates keyed by built-in provider name.  The loader materialises them into
@@ -152,15 +154,6 @@ BUILTIN_PROVIDER_SPECS: dict[str, dict] = {
         "max_tokens": 32768,
         "capabilities": [],
         "pricing": {"in": 2.0, "out": 8.0},
-    },
-    "perplexity": {
-        "api_type": "openai",
-        "env_key": "PERPLEXITY_API_KEY",
-        "base_url": "https://api.perplexity.ai",
-        "model": "sonar-deep-research",
-        "max_tokens": 128000,
-        "capabilities": ["web_search"],
-        "pricing": {"in": 2.0, "out": 8.0, "reasoning": 3.0, "searches_per_run": 50, "search_per_k": 5.0},
     },
     "gemini": {
         "api_type": "gemini",
@@ -228,9 +221,9 @@ def assign(agents, providers, seed=0, existing=None):
         still.append(name)
     unassigned = still
 
-    # 3. web-search agents -> a web-search-capable provider, preferring perplexity
+    # 3. web-search agents -> a web-search-capable provider (sorted by name)
     searchers = [p for p in providers.values() if _has_web_search(p)]
-    searchers.sort(key=lambda p: (p.name != "perplexity", p.name))
+    searchers.sort(key=lambda p: p.name)
     still = []
     for name in unassigned:
         if agents[name].requires_web_search and searchers:

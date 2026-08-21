@@ -20,7 +20,7 @@ def make_client(provider):
     if provider.api_type == "gemini":
         from google import genai
         return genai.Client(api_key=provider.api_key)
-    from openai import OpenAI                      # openai-compatible (perplexity/grok/deepseek/glm/openrouter/fireworks)
+    from openai import OpenAI                      # openai-compatible (grok/deepseek/glm/openrouter/fireworks)
     kwargs = {"api_key": provider.api_key}
     if provider.base_url:
         kwargs["base_url"] = provider.base_url
@@ -29,7 +29,7 @@ def make_client(provider):
 
 def _complete_openai(client, provider, system_prompt, user_prompt):
     # GPT-5+ rejects `max_tokens`, requiring `max_completion_tokens`. Other
-    # OpenAI-compatible endpoints (perplexity, grok, gpt-4.x) still use max_tokens.
+    # OpenAI-compatible endpoints (grok, gpt-4.x) still use max_tokens.
     m = (provider.model or "").lower()
     token_kw = "max_completion_tokens" if m.startswith(("gpt-5", "o1", "o3", "o4")) else "max_tokens"
     resp = client.chat.completions.create(
