@@ -1,0 +1,6 @@
+# Optional — semantic search over your research (scripts/search.py).
+# Install with:  pip install -r requirements-search.txt
+# Core research does NOT need these; without them, search skips gracefully.
+sqlite-vec>=0.1.6
+apsw>=3.46
+# openai is already in base requirements.txt

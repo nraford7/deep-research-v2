@@ -1,0 +1,15 @@
+# Deep Research dependencies
+# Install:  pip install -r requirements.txt
+
+# Model SDKs
+anthropic>=0.40.0
+openai>=1.55.0
+google-genai>=0.3.0
+
+# HTTP + parsing (helper scripts)
+requests>=2.31.0
+
+# Optional: faster fuzzy match for bibliography dedup
+rapidfuzz>=3.6.0
+
+# Optional: semantic search over your research — see requirements-search.txt

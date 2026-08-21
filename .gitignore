@@ -1,0 +1,44 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.python-version
+
+# Research outputs (large, generated)
+research/
+round1/
+round2/
+round2_5/
+round3/
+round4/
+retrieval_ledger.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.kata.local.toml
+# roborev snapshots
+/.roborev/
+
+# Deep Research config — holds inline API keys
+deep-research.toml
+**/config.toml
+
+# Local rollback substrate — never publish (holds a copy of the live config)
+config-backups/
+
+# Internal /do-it process docs — kept on disk, never published (contain local absolute paths)
+docs/
