@@ -21,14 +21,17 @@ Set CONTACT_EMAIL env var for the OpenAlex/Crossref "polite pool" — recommende
 """
 
 import argparse
+import ipaddress
 import json
 import os
 import re
+import socket
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, urlunparse
 
 try:
     import requests
@@ -39,23 +42,316 @@ except ImportError:
     sys.exit(1)
 
 
+# --- SSRF-hardened URL probe ------------------------------------------------
+# Three-state, allowlist-first URL liveness check. This is the security surface
+# of the verifier: it must never be trickable into connecting to an internal /
+# non-globally-routable address (SSRF), whether directly, via a multi-answer DNS
+# response, via an IPv4-mapped IPv6 address, or via a redirect that re-binds DNS
+# to an internal target. See probe_url for the full ruleset.
+
+PROBE_MAX_REDIRECTS = 3
+# (connect, read) tuple — a scalar would let a server trickle data below the
+# read-inactivity timeout indefinitely; bounding both caps each hop near 10s.
+PROBE_TIMEOUT = (10, 10)
+PROBE_READ_CAP = 512 * 1024  # 512 KB read-truncation ceiling
+PROBE_MAX_URLS = 60          # hard cap on URLs probed per run
+_ALLOWED_SCHEMES = ("http", "https")
+_ALLOWED_PORTS = {80, 443}
+
+
+@dataclass
+class ProbeResult:
+    state: str   # "resolved" | "unresolved" | "indeterminate"
+    reason: str  # short machine tag: "ok", "policy", "404", "http-403", "timeout", ...
+    url: str = ""
+
+
+# NAT64 well-known prefix (RFC 6052): 64:ff9b::/96 embeds an IPv4 in its low 32
+# bits. Crucially, ipaddress reports 64:ff9b::a9fe:a9fe as is_global==True — so a
+# NAT64-wrapped 169.254.169.254 (AWS metadata) would pass a naive is_global gate.
+# We unwrap it to the embedded IPv4 BEFORE vetting so the real address is judged.
+_NAT64_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
+
+
+def _unwrap_mapped(ip_str: str):
+    """Return an ipaddress object, unwrapping IPv4-mapped IPv6 (::ffff:a.b.c.d)
+    AND NAT64 (64:ff9b::/96) to the embedded IPv4 FIRST so the is_global check
+    sees the real address, never the translation wrapper."""
+    ip = ipaddress.ip_address(ip_str)
+    if isinstance(ip, ipaddress.IPv6Address):
+        # ipv4_mapped is the IPv4 address for ::ffff:a.b.c.d, else None.
+        mapped = getattr(ip, "ipv4_mapped", None)
+        if mapped is not None:
+            return mapped
+        if ip in _NAT64_PREFIX:
+            # low 32 bits are the embedded IPv4 (e.g. 64:ff9b::169.254.169.254)
+            return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return ip
+
+
+def _is_globally_routable(ip) -> bool:
+    """True only for a genuinely public, routable address. Rejects loopback,
+    private, link-local, multicast, reserved, unspecified — belt-and-suspenders
+    on top of is_global (which already excludes most of these). Also rejects the
+    NAT64 prefix outright: a defensive second line so this guarantee survives even
+    if _unwrap_mapped's NAT64 unwrap is ever removed (is_global alone would let
+    64:ff9b::<metadata-ip> through)."""
+    if isinstance(ip, ipaddress.IPv6Address) and ip in _NAT64_PREFIX:
+        return False
+    return (
+        ip.is_global
+        and not ip.is_multicast
+        and not ip.is_loopback
+        and not ip.is_link_local
+        and not ip.is_private
+        and not ip.is_reserved
+        and not ip.is_unspecified
+    )
+
+
+def _resolve_and_vet(host: str, port: int):
+    """Resolve `host` UP FRONT and vet EVERY returned A/AAAA answer.
+
+    Returns (first_vetted_ip_str, None) when every answer is globally routable,
+    else (None, ProbeResult(...)) describing the failure. A single non-global
+    answer poisons the whole set (blocks DNS-rebinding partials) — we do NOT
+    connect in that case."""
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return None, ProbeResult("unresolved", "dns", "")
+    except (socket.error, OSError):
+        return None, ProbeResult("unresolved", "dns", "")
+
+    if not infos:
+        return None, ProbeResult("unresolved", "dns", "")
+
+    first_ip = None
+    for info in infos:
+        sockaddr = info[4]
+        raw_ip = sockaddr[0]
+        try:
+            ip = _unwrap_mapped(raw_ip)
+        except ValueError:
+            return None, ProbeResult("indeterminate", "policy", "")
+        if not _is_globally_routable(ip):
+            # ANY non-global answer -> policy reject, never connect.
+            return None, ProbeResult("indeterminate", "policy", "")
+        if first_ip is None:
+            first_ip = str(ip)
+    return first_ip, None
+
+
+class _PinnedHTTPSAdapter(HTTPAdapter):
+    """HTTPS adapter that keeps TLS cert verification ON against the ORIGINAL
+    hostname even though we connect to a pinned IP. urllib3's PoolManager
+    forwards unknown kwargs to the connection pools as connection_pool_kw, so
+    `server_hostname` drives SNI + the default cert-hostname check, and
+    `assert_hostname` re-asserts the cert matches the original host.
+
+    Disabling TLS verification is FORBIDDEN here (and a source-grep test
+    enforces its absence): we pin the IP but still validate the certificate
+    against the real host."""
+
+    def __init__(self, server_hostname: str, *args, **kwargs):
+        self._server_hostname = server_hostname
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["server_hostname"] = self._server_hostname
+        kwargs["assert_hostname"] = self._server_hostname
+        return super().init_poolmanager(*args, **kwargs)
+
+
+def _probe_session(original_host: str, pinned_ip: str) -> requests.Session:
+    """A session that connects to `pinned_ip` but presents/verifies TLS for
+    `original_host`. trust_env is False so proxy env vars cannot bypass the pin.
+    NOTE: TLS verification stays ON — it is never disabled."""
+    s = requests.Session()
+    s.trust_env = False  # ignore HTTP(S)_PROXY / NO_PROXY — a proxy bypasses the IP pin
+    s.headers.update({"User-Agent": f"deep-research/2.0 (mailto:{CONTACT})"})
+    s.mount("https://", _PinnedHTTPSAdapter(original_host))
+    # For http:// there is no TLS to verify; the IP pin (host rewritten below)
+    # plus the original Host header are what matter.
+    s.mount("http://", HTTPAdapter())
+    return s
+
+
+def _parse_probe_target(url: str):
+    """Parse + policy-check a single URL. Returns (host, port, pinned_ip, pinned_url)
+    on success, else (None, ProbeResult). Enforces scheme/userinfo/port allowlists
+    and resolves+vets DNS UP FRONT, pinning the connection to the first vetted IP."""
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return None, ProbeResult("indeterminate", "policy", url)
+
+    if p.scheme not in _ALLOWED_SCHEMES:
+        return None, ProbeResult("indeterminate", "policy", url)
+    if p.username or p.password:
+        # userinfo in the authority (user:pass@host) is rejected outright.
+        return None, ProbeResult("indeterminate", "policy", url)
+
+    host = p.hostname
+    if not host:
+        return None, ProbeResult("indeterminate", "policy", url)
+
+    default_port = 443 if p.scheme == "https" else 80
+    try:
+        port = p.port if p.port is not None else default_port
+    except ValueError:
+        return None, ProbeResult("indeterminate", "policy", url)
+    if port not in _ALLOWED_PORTS:
+        return None, ProbeResult("indeterminate", "policy", url)
+
+    pinned_ip, err = _resolve_and_vet(host, port)
+    if err is not None:
+        err.url = url
+        return None, err
+
+    # Rewrite the netloc to the pinned IP (bracket IPv6) so we connect exactly
+    # to the vetted address; the Host header (set by the caller) stays original.
+    try:
+        ipaddress.IPv6Address(pinned_ip)
+        netloc_ip = f"[{pinned_ip}]"
+    except (ipaddress.AddressValueError, ValueError):
+        netloc_ip = pinned_ip
+    if p.port is not None:
+        netloc_ip = f"{netloc_ip}:{port}"
+    pinned_url = urlunparse((p.scheme, netloc_ip, p.path or "/", p.params, p.query, ""))
+    return (host, port, pinned_ip, pinned_url), None
+
+
+def _classify_status(code: int) -> ProbeResult:
+    if 200 <= code < 300:
+        return ProbeResult("resolved", "ok")
+    if code in (404, 410):
+        return ProbeResult("unresolved", str(code))
+    # 401/403/405/429/5xx -> indeterminate (flag + keep, never drop).
+    return ProbeResult("indeterminate", f"http-{code}")
+
+
+def probe_url(url: str) -> ProbeResult:
+    """Three-state SSRF-hardened liveness probe.
+
+    state -> "resolved" | "unresolved" | "indeterminate"
+      2xx                                   -> resolved
+      404 / 410 / DNS-failure / conn-refused -> unresolved
+      401/403/405/429/5xx / TLS / timeout /
+        oversize-truncation / policy-reject  -> indeterminate (with reason)
+
+    SSRF rules (all enforced): scheme http/https only; no userinfo; port 80/443
+    only; DNS resolved + EVERY answer vetted globally-routable UP FRONT (IPv4-
+    mapped IPv6 unwrapped first); connection PINNED to the first vetted IP with
+    the original Host header and TLS verified against the original hostname
+    (disabling TLS verification is forbidden); proxy env ignored
+    (trust_env=False); each redirect
+    (<=3) re-parsed / re-resolved / re-vetted / re-pinned; 512KB read cap; 10s
+    per-hop timeout. Flag + KEEP, never silently drop."""
+    current = url
+    last = ProbeResult("indeterminate", "policy", url)
+    for _hop in range(PROBE_MAX_REDIRECTS + 1):
+        target, err = _parse_probe_target(current)
+        if err is not None:
+            return err
+        host, port, pinned_ip, pinned_url = target
+        session = _probe_session(host, pinned_ip)
+        try:
+            resp = session.get(
+                pinned_url,
+                headers={"Host": host},
+                allow_redirects=False,     # manual — every hop must be re-vetted
+                timeout=PROBE_TIMEOUT,
+                stream=True,
+            )
+        except requests.exceptions.SSLError:
+            return ProbeResult("indeterminate", "tls", url)
+        except requests.exceptions.Timeout:
+            return ProbeResult("indeterminate", "timeout", url)
+        except requests.exceptions.ConnectionError:
+            return ProbeResult("unresolved", "conn-refused", url)
+        except requests.exceptions.RequestException:
+            return ProbeResult("indeterminate", "request-error", url)
+        finally:
+            pass
+
+        try:
+            code = resp.status_code
+            # Redirect: re-resolve + re-vet the target on the NEXT loop.
+            if code in (301, 302, 303, 307, 308) and "location" in {k.lower() for k in resp.headers}:
+                location = resp.headers.get("Location") or resp.headers.get("location")
+                if not location:
+                    return _classify_status(code)
+                current = requests.compat.urljoin(current, location)
+                last = ProbeResult("indeterminate", "redirect", url)
+                continue
+
+            result = _classify_status(code)
+            if result.state == "resolved":
+                # Enforce the read cap: pull up to CAP+1 bytes; if the body
+                # exceeds the cap, mark oversize-truncation -> indeterminate.
+                read = 0
+                oversize = False
+                try:
+                    for chunk in resp.iter_content(chunk_size=65536):
+                        if not chunk:
+                            continue
+                        read += len(chunk)
+                        if read > PROBE_READ_CAP:
+                            oversize = True
+                            break
+                except requests.exceptions.RequestException:
+                    return ProbeResult("indeterminate", "read-error", url)
+                if oversize:
+                    return ProbeResult("indeterminate", "oversize-truncation", url)
+            result.url = url
+            return result
+        finally:
+            resp.close()
+
+    # Exhausted the redirect budget without a terminal response.
+    last.reason = "too-many-redirects"
+    last.url = url
+    return last
+
+
 CONTACT = os.environ.get("CONTACT_EMAIL", "anonymous@example.com")
 OPENALEX = "https://api.openalex.org"
 CROSSREF = "https://api.crossref.org"
 
 # Citation patterns — broadened to handle:
-#   [Smith, 2020]                 — solo author
-#   [Smith et al., 2020]          — et al
-#   [Smith & Jones, 2020]         — two-author ampersand
-#   [Smith and Jones, 2020]       — two-author and
-#   [van der Berg, 2020]          — lowercase particles
-#   [U.S. Treasury, 2024]         — institutional with dots
-#   (Smith, 2020) and (Smith et al., 2020)  — parenthetical APA
-# Author group: optional honorific/particle prefix, capitalized surname, optional
-# co-author suffix. Body allows letters, dots, spaces, hyphens, apostrophes.
+#   [Smith, 2020]                 — solo author            (ACADEMIC)
+#   [Smith et al., 2020]          — et al                  (ACADEMIC)
+#   [Smith & Jones, 2020]         — two-author ampersand   (ACADEMIC)
+#   [Smith and Jones, 2020]       — two-author and         (ACADEMIC)
+#   [van der Berg, 2020]          — lowercase particles    (ACADEMIC)
+#   [U.S. Treasury, 2024]         — institutional w/ dots  (ACADEMIC — has a space)
+#   (Smith, 2020) and (Smith et al., 2020)  — parenthetical APA (ACADEMIC)
+#   [treasury.gov, 2024]          — bare domain            (WEB)
+#   [9news.com, n.d.]             — digit domain, no date  (WEB — n.d. web-only)
+#
+# The pattern carries TWO named alternatives for the citation HEAD:
+#   `domain` — a bare domain: dot-separated lowercase/digit/hyphen labels, NO
+#              spaces, NO uppercase (deliberately NOT re.IGNORECASE) => WEB.
+#   `author` — the existing academic author group (surname, &/and/et al., dots,
+#              spaces, particles) => ACADEMIC.
+# The domain alternative is tried FIRST so a clean lowercase domain routes web;
+# anything with a space (e.g. "U.S. Treasury") or any uppercase (e.g.
+# "Treasury.gov") cannot match `domain` and falls through to `author`.
+#
+# Year group: `\d{4}[a-z]?` (optional suffix like 2021a) OR `n.d.`. `n.d.` is
+# WEB-ONLY — enforced downstream in classify_cite / extract_inline_cites (a
+# `n.d.` head that is NOT a domain is rejected as invalid).
+#
+# NOTE: the whole regex is compiled WITHOUT re.IGNORECASE. The academic author
+# group already spells out both cases explicitly, so case-sensitivity is what
+# makes "Treasury.gov" (uppercase) route academic while "treasury.gov" routes web.
 _AUTHOR_GROUP = r"(?:[A-Za-z][A-Za-z\.\-' ]{0,80}?)"
+_AUTHOR_ALT = rf"{_AUTHOR_GROUP}(?:\s+(?:et\s+al\.?|&\s+{_AUTHOR_GROUP}|and\s+{_AUTHOR_GROUP}))?"
+_DOMAIN_ALT = r"[a-z0-9-]+(?:\.[a-z0-9-]+)+"
+_YEAR_ALT = r"\d{4}[a-z]?|n\.d\."
 INLINE_CITE_RE = re.compile(
-    rf"[\[\(]\s*({_AUTHOR_GROUP}(?:\s+(?:et\s+al\.?|&\s+{_AUTHOR_GROUP}|and\s+{_AUTHOR_GROUP}))?),?\s*(\d{{4}}[a-z]?)\s*[\]\)]"
+    rf"[\[\(]\s*(?:(?P<domain>{_DOMAIN_ALT})|(?P<author>{_AUTHOR_ALT})),?\s*(?P<year>{_YEAR_ALT})\s*[\]\)]"
 )
 URL_RE = re.compile(r"https?://[^\s\)\]\>]+")
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
@@ -96,20 +392,51 @@ def find_md_files(path: Path):
     return sorted(path.rglob("*.md"))
 
 
+def classify_cite(cite: dict) -> str:
+    """Route a parsed citation to 'web' or 'academic'.
+
+    A citation whose HEAD matched the `domain` alternative (bare lowercase
+    domain, no spaces) is WEB; anything that matched the `author` alternative is
+    ACADEMIC. `n.d.` is only ever produced for web citations (see
+    extract_inline_cites), so an `n.d.` year implies web too."""
+    if cite.get("kind"):
+        return cite["kind"]
+    if cite.get("domain"):
+        return "web"
+    if cite.get("year") == "n.d.":
+        return "web"
+    return "academic"
+
+
 def extract_inline_cites(text: str):
     cites = []
     seen = set()
     for m in INLINE_CITE_RE.finditer(text):
-        author = m.group(1).strip()
-        year = m.group(2)
-        # Skip noise that looks like a citation but isn't (e.g. "[1, 2020]")
+        domain = m.group("domain")
+        author = m.group("author")
+        year = m.group("year")
+        if domain:
+            # WEB citation — bare domain head.
+            head = domain.strip()
+            key = ("web:" + head.lower(), year, m.start())
+            if key in seen:
+                continue
+            seen.add(key)
+            cites.append({"author": head, "year": year, "kind": "web", "domain": head})
+            continue
+        # ACADEMIC citation — author head.
+        author = (author or "").strip()
+        # `n.d.` is web-only: an academic author head with n.d. is NOT a valid cite.
+        if year == "n.d.":
+            continue
+        # Skip noise that looks like a citation but isn't (e.g. "[1, 2020]").
         if not re.search(r"[A-Za-z]{2}", author):
             continue
         key = (author.lower(), year, m.start())
         if key in seen:
             continue
         seen.add(key)
-        cites.append({"author": author, "year": year})
+        cites.append({"author": author, "year": year, "kind": "academic"})
     return cites
 
 
@@ -213,18 +540,6 @@ def resolve_entry(s, entry: str):
     return None
 
 
-def check_url(s, url: str):
-    try:
-        r = s.head(url, allow_redirects=True, timeout=10)
-        code = r.status_code
-        if code >= 400:
-            with s.get(url, allow_redirects=True, timeout=10, stream=True) as g:
-                code = g.status_code
-        return code
-    except requests.RequestException:
-        return None
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", help="Markdown file or directory")
@@ -252,12 +567,19 @@ def main():
             bib_origin.setdefault(entry, []).append(str(f))
 
     bib_unique = list(dict.fromkeys(all_bib))
+    # A WEB-only bibliography entry has no 4-digit academic year but carries a
+    # URL or an explicit n.d. marker. These are verified through the URL probe
+    # (their URLs are already in all_urls), NOT the academic OpenAlex/Crossref
+    # resolvers — sending them there would falsely flag them as unresolved.
+    academic_bib = [e for e in bib_unique
+                    if re.search(r"\b(19|20)\d{2}\b", e)]
     print(f"Files scanned: {len(files)}", flush=True)
-    print(f"Inline citations: {len(all_cites)}  Bibliography entries: {len(bib_unique)}  URLs: {len(all_urls)}", flush=True)
+    print(f"Inline citations: {len(all_cites)}  Bibliography entries: {len(bib_unique)} "
+          f"(academic: {len(academic_bib)})  URLs: {len(all_urls)}", flush=True)
 
     resolutions = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futures = {ex.submit(resolve_entry, s, e): e for e in bib_unique}
+        futures = {ex.submit(resolve_entry, s, e): e for e in academic_bib}
         done = 0
         for fut in as_completed(futures):
             entry = futures[fut]
@@ -267,7 +589,7 @@ def main():
                 resolutions[entry] = {"error": str(exc)}
             done += 1
             if done % 10 == 0:
-                print(f"  resolved {done}/{len(bib_unique)}", flush=True)
+                print(f"  resolved {done}/{len(academic_bib)}", flush=True)
 
     bib_keys = []
     for entry in bib_unique:
@@ -283,19 +605,45 @@ def main():
 
     orphans = []
     for c in all_cites:
+        # Web citations ([domain, year]) are not matched against the academic
+        # bibliography keys — they route to the URL probe instead.
+        if c.get("kind") == "web":
+            continue
         first_sn = first_surname(c["author"])
         if first_sn and not any(k[0] == first_sn and k[1] == c["year"] for k in bib_keys):
             orphans.append(c)
 
-    dead_urls = []
+    # Three-state SSRF-hardened URL probe. Every URL is flagged + KEPT, never
+    # dropped. Capped at PROBE_MAX_URLS per run; the overflow is noted.
+    probe_unresolved, probe_indeterminate = [], []
+    url_truncated = 0
     if args.check_urls:
-        unique_urls = list({u for u, _ in all_urls})
+        # Bare web citations like [treasury.gov, 2024] carry no explicit URL in
+        # the prose, so synthesize https://<domain> for them — otherwise a web
+        # citation with no bibliography entry AND no inline URL would slip
+        # through both orphan detection and the probe entirely.
+        web_cite_urls = {
+            f"https://{c['domain']}"
+            for c in all_cites
+            if c.get("kind") == "web" and c.get("domain")
+        }
+        unique_urls = list({u for u, _ in all_urls} | web_cite_urls)
+        if len(unique_urls) > PROBE_MAX_URLS:
+            url_truncated = len(unique_urls) - PROBE_MAX_URLS
+            unique_urls = unique_urls[:PROBE_MAX_URLS]
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futures = {ex.submit(check_url, s, u): u for u in unique_urls}
+            futures = {ex.submit(probe_url, u): u for u in unique_urls}
             for fut in as_completed(futures):
-                code = fut.result()
-                if code is None or code >= 400:
-                    dead_urls.append((futures[fut], code))
+                url = futures[fut]
+                try:
+                    pr = fut.result()
+                except Exception as exc:
+                    pr = ProbeResult("indeterminate", f"probe-error:{exc}", url)
+                if pr.state == "unresolved":
+                    probe_unresolved.append((url, pr.reason))
+                elif pr.state == "indeterminate":
+                    probe_indeterminate.append((url, pr.reason))
+    n_flagged_urls = len(probe_unresolved) + len(probe_indeterminate)
 
     unresolved = [e for e, r in resolutions.items() if not r or r.get("error")]
     weak_match = [(e, r) for e, r in resolutions.items() if r and not r.get("error") and r.get("title_match", 0) < 0.4]
@@ -307,7 +655,7 @@ def main():
         f"- Files scanned: **{len(files)}**",
         f"- Inline citations found: **{len(all_cites)}**",
         f"- Bibliography entries: **{len(bib_unique)}**",
-        f"- URLs: **{len(all_urls)}**" + ("" if not args.check_urls else f" — dead: **{len(dead_urls)}**"),
+        f"- URLs: **{len(all_urls)}**" + ("" if not args.check_urls else f" — flagged (unresolved+indeterminate): **{n_flagged_urls}**"),
         "",
         "## Summary",
         "",
@@ -317,7 +665,8 @@ def main():
         f"| Weak match (< 0.4) | {len(weak_match)} |",
         f"| Unresolved | {len(unresolved)} |",
         f"| Orphaned inline cites | {len(orphans)} |",
-        f"| Dead URLs | {len(dead_urls) if args.check_urls else 'not checked'} |",
+        f"| Links unresolved | {len(probe_unresolved) if args.check_urls else 'not checked'} |",
+        f"| Links indeterminate | {len(probe_indeterminate) if args.check_urls else 'not checked'} |",
         "",
     ]
 
@@ -339,10 +688,40 @@ def main():
             out.append(f"- `[{c['author']}, {c['year']}]` in `{c['file']}`")
         out.append("")
 
-    if args.check_urls and dead_urls:
-        out += ["## ⚠ Dead URLs", "", "Returned 4xx/5xx or no response.", ""]
-        for u, code in dead_urls[:200]:
-            out.append(f"- {code or 'no-response'} — {u}")
+    if args.check_urls and (probe_unresolved or probe_indeterminate or url_truncated):
+        out += [
+            "## ⚠ Unresolved links",
+            "",
+            "Three-state link probe (SSRF-hardened). Every link is **kept** — this "
+            "is a flag, not a deletion. `unresolved` = the page is gone (404/410) "
+            "or unreachable (DNS/connection). `indeterminate` = we could not "
+            "confirm liveness (auth wall, blocked method, rate limit, server "
+            "error, TLS problem, timeout, oversize body, or a policy rejection "
+            "such as a non-globally-routable host).",
+            "",
+        ]
+        out += ["### Unresolved (page gone / unreachable)", ""]
+        if probe_unresolved:
+            for u, reason in sorted(probe_unresolved)[:200]:
+                out.append(f"- ({reason}) {u}")
+        else:
+            out.append("- none")
+        out.append("")
+        out += ["### Indeterminate (could not confirm)", ""]
+        if probe_indeterminate:
+            for u, reason in sorted(probe_indeterminate)[:200]:
+                out.append(f"- ({reason}) {u}")
+        else:
+            out.append("- none")
+        out.append("")
+        out += ["### Truncation note", ""]
+        if url_truncated:
+            out.append(
+                f"- {url_truncated} URL(s) beyond the per-run cap of "
+                f"{PROBE_MAX_URLS} were not probed (kept, unchecked)."
+            )
+        else:
+            out.append(f"- All URLs within the per-run cap of {PROBE_MAX_URLS} were probed.")
         out.append("")
 
     if resolved:
@@ -366,10 +745,14 @@ def main():
             "weak_match": len(weak_match),
             "unresolved": len(unresolved),
             "orphans": len(orphans),
-            "dead_urls": len(dead_urls) if args.check_urls else None,
+            "links_unresolved": len(probe_unresolved) if args.check_urls else None,
+            "links_indeterminate": len(probe_indeterminate) if args.check_urls else None,
+            "links_truncated": url_truncated if args.check_urls else None,
         },
         "unresolved": unresolved,
         "orphans": orphans,
+        "links_unresolved": [{"url": u, "reason": r} for u, r in probe_unresolved],
+        "links_indeterminate": [{"url": u, "reason": r} for u, r in probe_indeterminate],
     }, indent=2), encoding="utf-8")
     print(f"JSON: {json_path}", flush=True)
 

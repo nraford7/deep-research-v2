@@ -118,10 +118,13 @@ def classify(entry: str) -> str:
 
 BIB_BULLET_RE = re.compile(r"^\s*(?:[-*]\s+|\d+\.\s+)")
 YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+URL_RE = re.compile(r"https?://[^\s\)\]]+", re.IGNORECASE)
 
 
 def parse_entries(text: str):
-    """Match dedup_bib.py output: bullet/numbered lines with a year."""
+    """Match dedup_bib.py output: bullet/numbered lines. Academic entries carry
+    a 4-digit year; year-less WEB entries are still kept when they carry a URL
+    or an explicit n.d. marker, so they can be tiered by domain (not dropped)."""
     entries = []
     for raw in text.splitlines():
         line = raw.rstrip()
@@ -130,8 +133,11 @@ def parse_entries(text: str):
         if not BIB_BULLET_RE.match(line):
             continue
         body = BIB_BULLET_RE.sub("", line, count=1).strip()
-        if len(body) < 30 or not YEAR_RE.search(body):
+        if len(body) < 30:
             continue
+        if not YEAR_RE.search(body):
+            if not (URL_RE.search(body) or "n.d." in body.lower()):
+                continue
         entries.append(body)
     return entries
 

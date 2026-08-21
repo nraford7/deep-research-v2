@@ -25,9 +25,16 @@ from pathlib import Path
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
 URL_RE = re.compile(r"https?://[^\s\)\]]+")
 YEAR_RE = re.compile(r"\b(19|20)\d{2}[a-z]?\b")
+# INLINE_CITE_RE is kept BYTE-FOR-BYTE identical to verify_citations.py's copy
+# (two named alternatives — `domain` for bare lowercase web domains, `author`
+# for academic author heads — plus a shared year group that accepts n.d.). If
+# these diverge, n.d. / digit-domain web cites never reach claims.jsonl.
 _AUTHOR_GROUP = r"(?:[A-Za-z][A-Za-z\.\-' ]{0,80}?)"
+_AUTHOR_ALT = rf"{_AUTHOR_GROUP}(?:\s+(?:et\s+al\.?|&\s+{_AUTHOR_GROUP}|and\s+{_AUTHOR_GROUP}))?"
+_DOMAIN_ALT = r"[a-z0-9-]+(?:\.[a-z0-9-]+)+"
+_YEAR_ALT = r"\d{4}[a-z]?|n\.d\."
 INLINE_CITE_RE = re.compile(
-    rf"[\[\(]\s*({_AUTHOR_GROUP}(?:\s+(?:et\s+al\.?|&\s+{_AUTHOR_GROUP}|and\s+{_AUTHOR_GROUP}))?),?\s*(\d{{4}}[a-z]?)\s*[\]\)]"
+    rf"[\[\(]\s*(?:(?P<domain>{_DOMAIN_ALT})|(?P<author>{_AUTHOR_ALT})),?\s*(?P<year>{_YEAR_ALT})\s*[\]\)]"
 )
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
 BIB_BULLET_RE = re.compile(r"^\s*(?:[-*]\s+|\d+\.\s+)")
@@ -47,8 +54,12 @@ def parse_bib_entries(text: str):
         body = BIB_BULLET_RE.sub("", line, count=1).strip()
         if len(body) < 30:
             continue
+        # A real academic entry has a 4-digit year. A WEB entry may be undated
+        # (n.d.) — accept it when it carries a URL or an explicit n.d. marker so
+        # year-less web sources are not silently dropped.
         if not YEAR_RE.search(body):
-            continue
+            if not (URL_RE.search(body) or "n.d." in body.lower()):
+                continue
         entries.append(body)
     return entries
 
@@ -57,24 +68,66 @@ def bibtex_escape(s: str) -> str:
     return s.replace("{", "\\{").replace("}", "\\}").replace("%", "\\%").replace("$", "\\$").replace("&", "\\&")
 
 
+_LEADING_DOMAIN_RE = re.compile(r"^\s*([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b")
+_ND_RE = re.compile(r"\bn\.d\.", re.IGNORECASE)
+
+
 def extract_authors_year_title(entry: str):
+    """Split a bibliography line into (author_key, year, authors, title).
+
+    Academic lines have a 4-digit year. Undated WEB lines (no year) are handled
+    separately: the leading token is a bare domain, the year is `n.d.`, and the
+    title is the text between the `n.d.` marker (or the domain) and the URL — so
+    the author/title fields are clean instead of a truncated dot-split."""
     year_m = YEAR_RE.search(entry)
-    year = year_m.group(0) if year_m else "n.d."
-    pre = entry[:year_m.start()] if year_m else entry
-    pre = pre.rstrip(" (.,")
-    author_first = re.match(r"([A-Z][A-Za-z\-']+)", pre)
-    author_key = author_first.group(1) if author_first else "Anon"
-    post = entry[year_m.end():].strip(" .,)") if year_m else entry
-    title_m = re.match(r"[^.\"]+", post)
-    title = title_m.group(0).strip(" \"'.,") if title_m else post[:200]
-    return author_key, year, pre.strip(), title
+    if year_m:
+        year = year_m.group(0)
+        pre = entry[:year_m.start()].rstrip(" (.,")
+        author_first = re.match(r"([A-Z][A-Za-z\-']+)", pre)
+        if author_first:
+            author_key = author_first.group(1)
+        else:
+            # A dated WEB entry leads with a bare lowercase domain — key off it.
+            dom_m = _LEADING_DOMAIN_RE.match(entry)
+            author_key = re.sub(r"[^A-Za-z0-9]", "", dom_m.group(1)) if dom_m else "Anon"
+        post = entry[year_m.end():].strip(" .,)")
+        title_m = re.match(r"[^.\"]+", post)
+        title = title_m.group(0).strip(" \"'.,") if title_m else post[:200]
+        return author_key, year, pre.strip(), title
+
+    # Undated web entry: pull the leading domain as author + BibTeX key stem.
+    dom_m = _LEADING_DOMAIN_RE.match(entry)
+    if dom_m:
+        domain = dom_m.group(1)
+        # BibTeX keys must be alphanumeric-ish; strip dots/hyphens from the stem.
+        author_key = re.sub(r"[^A-Za-z0-9]", "", domain) or "Anon"
+        authors = domain
+    else:
+        author_key = "Anon"
+        authors = ""
+    # Title = text after the n.d. marker (or the domain), up to the first URL.
+    tail = entry
+    nd_m = _ND_RE.search(entry)
+    if nd_m:
+        tail = entry[nd_m.end():]
+    elif dom_m:
+        tail = entry[dom_m.end():]
+    tail = URL_RE.sub("", tail)
+    title = tail.strip(" ().,\"'").strip()
+    title = re.split(r"(?<=[.!?])\s", title, maxsplit=1)[0].strip(" .\"'")
+    if not title:
+        title = authors or "Untitled"
+    return author_key, "n.d.", authors, title[:300]
 
 
 def to_bibtex_entry(entry: str, author_year_counter: dict) -> str:
     author_key, year, authors, title = extract_authors_year_title(entry)
     doi_m = DOI_RE.search(entry)
     url_m = URL_RE.search(entry)
-    base = f"{author_key}{year}"
+    # BibTeX cite keys must not contain punctuation like the '.' in "n.d." —
+    # sanitize the key stem (the `year` FIELD below keeps its literal value).
+    year_key = re.sub(r"[^A-Za-z0-9]", "", year) or "nd"
+    base = f"{author_key}{year_key}"
     seen = author_year_counter.get(base, 0)
     author_year_counter[base] = seen + 1
     if seen == 0:
@@ -94,18 +147,59 @@ def to_bibtex_entry(entry: str, author_year_counter: dict) -> str:
     return "@misc{" + key + ",\n" + ",\n".join(fields) + "\n}"
 
 
+def _url_host(url: str) -> str:
+    from urllib.parse import urlparse
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _cite_dict(m, sentence: str):
+    """Turn one INLINE_CITE_RE match into a claim citation dict, or None if the
+    match is not a valid citation (e.g. an academic-head `n.d.`, which is
+    web-only — mirrors extract_inline_cites in verify_citations.py).
+
+    A `domain`-matched head is a WEB citation and carries `kind="web"` plus a
+    `url` chosen by HOST match (exact host or a subdomain of the cited domain),
+    NOT a naive substring — `foo.com` must not match `notfoo.com`. If no URL in
+    the sentence has a matching host, the bare domain is used as the https://
+    fallback (we do NOT borrow an unrelated URL). An `author`-matched head is an
+    ACADEMIC citation; an academic head with `n.d.` is rejected (web-only)."""
+    domain = m.group("domain")
+    author = m.group("author")
+    year = m.group("year")
+    if domain:
+        domain = domain.lower()
+        url = None
+        for raw in URL_RE.findall(sentence):
+            u = raw.rstrip(".,;)")
+            host = _url_host(u)
+            if host == domain or host.endswith("." + domain):
+                url = u
+                break
+        if url is None:
+            url = f"https://{domain}"
+        return {"author": domain, "year": year, "kind": "web", "url": url}
+    if year == "n.d.":
+        # `n.d.` is web-only; an author-head n.d. is not a valid citation.
+        return None
+    return {"author": (author or "").strip(), "year": year, "kind": "academic"}
+
+
 def extract_claims(sections_dir: Path):
     for f in sorted(sections_dir.rglob("*.md")):
         text = f.read_text(encoding="utf-8", errors="replace")
         sentences = SENTENCE_SPLIT_RE.split(text)
         for sent in sentences:
-            cites = list(INLINE_CITE_RE.finditer(sent))
+            cites = [c for c in (_cite_dict(m, sent) for m in INLINE_CITE_RE.finditer(sent))
+                     if c is not None]
             if not cites:
                 continue
             yield {
                 "file": str(f),
                 "sentence": sent.strip()[:600],
-                "citations": [{"author": m.group(1), "year": m.group(2)} for m in cites],
+                "citations": cites,
             }
 
 

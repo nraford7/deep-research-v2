@@ -19,6 +19,7 @@ import argparse
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 try:
     from rapidfuzz import fuzz
@@ -30,6 +31,8 @@ except ImportError:
 
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
 URL_DOI_RE = re.compile(r"https?://(?:dx\.)?doi\.org/", re.IGNORECASE)
+URL_RE = re.compile(r"https?://[^\s\)\]]+", re.IGNORECASE)
+ND_RE = re.compile(r"\bn\.d\.", re.IGNORECASE)
 # Match a heading whose text CONTAINS bibliography/references/sources anywhere
 # (e.g. "# Master Bibliography", "## Works Cited / References"), not only at the start.
 BIB_HEADER_RE = re.compile(r"^(#{1,6})\s+.*\b(bibliography|references|works cited|sources)\b",
@@ -69,6 +72,48 @@ def normalize_doi(entry: str):
     return m.group(0).lower().rstrip(".,)").strip()
 
 
+def normalize_web_url(url: str):
+    """Canonical key for a web URL: lowercase scheme+host, drop the default
+    port, strip a trailing slash on the path, and remove utm_* query params.
+    Used to cluster web bibliography entries by the page they cite."""
+    url = url.strip().rstrip(".,);]")
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return url.lower()
+    scheme = (p.scheme or "http").lower()
+    host = (p.hostname or "").lower()
+    netloc = host
+    # p.port is a property that raises ValueError on a malformed/out-of-range
+    # port (e.g. "example.com:bad"); guard it so one bad entry can't abort the run.
+    try:
+        port = p.port
+    except ValueError:
+        port = None
+    if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+        netloc = f"{host}:{port}"
+    path = p.path or ""
+    if path.endswith("/") and path != "/":
+        path = path.rstrip("/")
+    if path == "/":
+        path = ""
+    q = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
+         if not k.lower().startswith("utm_")]
+    query = urlencode(sorted(q))
+    return urlunparse((scheme, netloc, path, "", query, ""))
+
+
+def extract_web_url(entry: str):
+    m = URL_RE.search(entry)
+    if not m:
+        return None
+    return normalize_web_url(m.group(0))
+
+
+def is_nd(entry: str) -> bool:
+    return bool(ND_RE.search(entry))
+
+
 def extract_year(entry: str):
     m = re.search(r"\b(19|20)\d{2}\b", entry)
     return int(m.group(0)) if m else None
@@ -101,23 +146,32 @@ def cluster_entries(entries_by_origin, threshold: float):
                 "text": e,
                 "origin": origin,
                 "doi": normalize_doi(e),
+                "web_url": extract_web_url(e),
+                "nd": is_nd(e),
                 "key": extract_title_key(e),
                 "year": extract_year(e),
             })
 
     # DOI cluster: NEVER merge across different DOIs even if titles match.
     doi_clusters = {}
+    web_clusters = {}
     no_doi = []
     for it in items:
         if it["doi"]:
             doi_clusters.setdefault(it["doi"], []).append(it)
+        elif it["web_url"]:
+            # WEB entry (URL, no DOI): cluster by normalized URL. n.d. web
+            # entries merge ONLY here — never by title (year-guard skip below).
+            web_clusters.setdefault(it["web_url"], []).append(it)
         else:
             no_doi.append(it)
 
     # Title cluster: require fuzzy threshold AND year within ±1 AND title key non-trivial.
     title_clusters = []
     for it in no_doi:
-        if len(it["key"]) < 12:
+        # Year-guard skip: an n.d. (undated) web entry with no URL has nothing to
+        # cluster on safely, so it stands alone — title-merge is disabled for it.
+        if it["nd"] or len(it["key"]) < 12:
             title_clusters.append([it])
             continue
         placed = False
@@ -133,7 +187,7 @@ def cluster_entries(entries_by_origin, threshold: float):
         if not placed:
             title_clusters.append([it])
 
-    return list(doi_clusters.values()) + title_clusters
+    return list(doi_clusters.values()) + list(web_clusters.values()) + title_clusters
 
 
 def pick_canonical(cluster):
