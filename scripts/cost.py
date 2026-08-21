@@ -24,6 +24,13 @@ import config
 TOKENS_PER_WORD = 1.35
 SAFETY_MARGIN = 1.15
 
+# Single home for retrieval fee assumptions — imported by the retrieval
+# scripts (Chunks 3+4) and by scripts/ledger.py worst-case charges.
+# Best-effort per-call USD estimates for Exa-backed retrieval.
+RETRIEVAL_FEES = {"slice_search": 0.02, "deep_reasoning": 0.02}
+# One automatic retry per metered call → worst-case cost is 2× the fee.
+RETRY_MULTIPLIER = 2
+
 
 def words_to_tokens(words: int) -> int:
     return int(words * TOKENS_PER_WORD)
