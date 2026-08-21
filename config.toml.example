@@ -23,6 +23,8 @@ model      = "deepseek-v4-pro"             # also deepseek-v4-flash (cheaper); l
                                             # deepseek-chat/deepseek-reasoner retire 2026-07-24
 max_tokens = 32768
 pricing    = { in = 0.55, out = 2.19 }
+family     = "other"                        # model lineage; drives adversary selection
+                                            # (adversary must differ from the anthropic synthesizer)
 
 # OpenRouter — best for reaching model lineages you can't get direct
 # (Kimi/GLM/Microsoft etc). Not the cheapest path for DeepSeek or Anthropic.
@@ -32,6 +34,7 @@ api_key    = "sk-or-xxxx"
 base_url   = "https://openrouter.ai/api/v1"
 model      = "moonshotai/kimi-k2.6"        # verify current id at openrouter.ai/models
 max_tokens = 32768
+family     = "other"
 
 # Fireworks — account-scoped model IDs
 [providers.glm]
@@ -40,6 +43,7 @@ api_key    = "fw_xxxx"
 base_url   = "https://api.fireworks.ai/inference/v1"
 model      = "accounts/fireworks/models/glm-5p1"   # verify current id at fireworks.ai/models
 max_tokens = 32768
+family     = "other"
 
 # Web-enabled subscription provider — live web search at $0 API cost
 # claude -p blocks tools by default; --allowedTools WebSearch Bash(curl:*) opts in
@@ -55,6 +59,8 @@ command      = "claude"
 # model      = "claude-opus-4-20250514"           # optional; omit to use CLI default
 extra_args   = ["--allowedTools", "WebSearch", "Bash(curl:*)"]
 capabilities = ["web_search"]                     # marks it real-time-eligible
+family       = "anthropic"                         # same lineage as the metered `claude` built-in;
+                                                    # adversary selection SKIPS anthropic providers
 
 # One-off calls (Round 0 scoping, future synthesis) — pick a cheap/subscription
 # provider. Avoid a metered web-search provider here: its per-search cost is wasted
@@ -63,6 +69,52 @@ capabilities = ["web_search"]                     # marks it real-time-eligible
 utility = "claude-sub"     # provider for one-off calls (scoping). Falls back to
                            # claude-sub → claude → chatgpt → any available provider.
 # synthesis = "claude-sub" # reserved for future reasoning/synthesis rounds
+
+# ---------------------------------------------------------------------------
+# Run configuration (Round-1 retrieval + adversary). All keys optional — omit
+# the whole [run] table to accept the code defaults shown here.
+# ---------------------------------------------------------------------------
+# [run]
+# mode                = "slices"   # the only supported mode; any other value errors
+# max_retrieval_usd   = 1.0        # per-run hard money cap on Exa retrieval
+# min_evidence_total  = 10         # gate: minimum globally-unique evidence items
+# min_nonempty_slices = 2          # gate: minimum slices that returned ≥1 item
+# adversary           = ["grok", "chatgpt", "gemini"]  # walked in order; the first
+#                                  # CONFIGURED + available provider whose family is
+#                                  # NOT "anthropic" becomes the adversary. If none
+#                                  # qualify, it falls back to the anthropic synthesizer
+#                                  # (with a warning) — configure a non-anthropic
+#                                  # provider for an independent adversary.
+
+# ---------------------------------------------------------------------------
+# Round-1 slice roster. Omit all [slices.*] tables to accept the 5-slice code
+# default. Each slice sets EITHER `category` (an Exa category enum) OR
+# `include_domains` (a domain allowlist) — never both (they are XOR).
+# ---------------------------------------------------------------------------
+# [slices.publication]
+# query    = "{topic}"                     # {topic} is substituted at run time
+# category = "research paper"
+# enabled  = true
+
+# [slices.news]
+# query    = "{topic} latest developments"
+# category = "news"
+# enabled  = true
+
+# [slices.institutional]
+# query           = "{topic} policy report analysis"
+# include_domains = ["oecd.org", "worldbank.org", "imf.org", "un.org", "brookings.edu"]
+# enabled         = true
+
+# [slices.financial]
+# query    = "{topic} financial analysis"
+# category = "financial report"
+# enabled  = false
+
+# [slices.personal-site]
+# query           = "{topic}"
+# include_domains = ["substack.com", "medium.com"]
+# enabled         = false
 
 # Agent mappings — deliberate diverse spread across model lineages.
 # Built-in defaults are used for any agent not listed here.

@@ -28,6 +28,7 @@ class Provider:
     max_concurrency: int | None = None
     command: str | None = None          # CLI binary name/path for cli providers
     extra_args: tuple[str, ...] = ()   # opt-in extra CLI flags (e.g. to enable web search)
+    family: str = "other"               # model lineage/vendor family (e.g. "anthropic", "openai")
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,7 @@ DEFAULT_PAIRING: dict[str, str] = {
 BUILTIN_PROVIDER_SPECS: dict[str, dict] = {
     "claude": {
         "api_type": "anthropic",
+        "family": "anthropic",
         # The previous default `claude-opus-4-20250514` was retired and now 404s.
         # Pinned to a current Opus; override in TOML as model IDs drift.
         "model": "claude-opus-4-8",
@@ -149,6 +151,7 @@ BUILTIN_PROVIDER_SPECS: dict[str, dict] = {
     },
     "chatgpt": {
         "api_type": "openai",
+        "family": "openai",
         "env_key": "OPENAI_API_KEY",
         "model": "gpt-4.1",
         "max_tokens": 32768,
@@ -157,6 +160,7 @@ BUILTIN_PROVIDER_SPECS: dict[str, dict] = {
     },
     "gemini": {
         "api_type": "gemini",
+        "family": "google",
         "env_key": "GOOGLE_API_KEY",
         "model": "gemini-2.5-pro",
         "fallback_models": ["gemini-2.5-flash", "gemini-2.0-flash"],
@@ -166,6 +170,7 @@ BUILTIN_PROVIDER_SPECS: dict[str, dict] = {
     },
     "grok": {
         "api_type": "openai",
+        "family": "xai",
         "env_key": "XAI_API_KEY",
         "base_url": "https://api.x.ai/v1",
         "model": "grok-3-latest",
@@ -294,6 +299,7 @@ def _provider_from_table(name, t, env):
             max_concurrency=t.get("max_concurrency"),
             command=t["command"],
             extra_args=tuple(t.get("extra_args", ())),
+            family=t.get("family", "other"),
         )
     missing = {"api_type", "model"} - t.keys()
     if missing:
@@ -312,6 +318,7 @@ def _provider_from_table(name, t, env):
         capabilities=tuple(t.get("capabilities", ())), pricing=t.get("pricing"),
         fallback_models=tuple(t.get("fallback_models", ())),
         max_concurrency=t.get("max_concurrency"),
+        family=t.get("family", "other"),
     )
 
 def _builtin_provider(name, env):
@@ -324,6 +331,7 @@ def _builtin_provider(name, env):
         base_url=spec.get("base_url"), max_tokens=spec.get("max_tokens", 32768),
         capabilities=tuple(spec.get("capabilities", ())), pricing=spec.get("pricing"),
         fallback_models=tuple(spec.get("fallback_models", ())),
+        family=spec.get("family", "other"),
     )
 
 def load_defaults(toml_paths):
@@ -371,3 +379,144 @@ def load_config(toml_paths, env):
                                           base.requires_web_search if base else False),
             )
     return providers, agents
+
+
+# ---------------------------------------------------------------------------
+# Run configuration — Round-1 slice roster + adversary selection (v2)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SliceSpec:
+    query: str
+    category: str | None                # XOR with include_domains (Exa contract)
+    include_domains: tuple[str, ...] | None   # tuple: real frozenness + hashability, no shared-mutable leak
+    enabled: bool
+
+
+@dataclass(frozen=True)
+class RunConfig:
+    mode: str                           # "slices" is the only valid mode
+    max_retrieval_usd: float
+    min_evidence_total: int
+    min_nonempty_slices: int
+    slices: dict[str, SliceSpec]
+    adversary_chain: list[str]          # as configured; walked for selection
+    adversary: str                      # resolved adversary provider name
+    synthesizer: str                    # anthropic synthesis provider name
+    adversary_warning: str | None
+
+
+# Ship defaults for the Round-1 slice roster when no [slices.*] table is present.
+# publication/news use Exa `category`; institutional/personal-site use `include_domains`.
+_DEFAULT_SLICES: dict[str, SliceSpec] = {
+    "publication": SliceSpec(
+        query="{topic}", category="research paper",
+        include_domains=None, enabled=True),
+    "news": SliceSpec(
+        query="{topic} latest developments", category="news",
+        include_domains=None, enabled=True),
+    "institutional": SliceSpec(
+        query="{topic} policy report analysis", category=None,
+        include_domains=("oecd.org", "worldbank.org", "imf.org", "un.org", "brookings.edu"),
+        enabled=True),
+    "financial": SliceSpec(
+        query="{topic} financial analysis", category="financial report",
+        include_domains=None, enabled=False),
+    "personal-site": SliceSpec(
+        query="{topic}", category=None,
+        include_domains=("substack.com", "medium.com"), enabled=False),
+}
+
+
+def _slice_from_table(name, t):
+    category = t.get("category")
+    include_domains = t.get("include_domains")
+    if category is not None and include_domains is not None:
+        raise ValueError(
+            f"slice '{name}' sets both category and include_domains — they are XOR "
+            f"(Exa accepts one filter axis, not both).")
+    if include_domains is not None:
+        include_domains = tuple(include_domains)
+    return SliceSpec(
+        query=t.get("query", "{topic}"),
+        category=category,
+        include_domains=include_domains,
+        enabled=bool(t.get("enabled", True)),
+    )
+
+
+def _resolve_adversary(chain, providers, synthesizer_name):
+    """Walk the configured chain; pick the first configured+available provider whose
+    family is not 'anthropic'. Skip chain entries naming no configured provider.
+    If none qualify, warn and fall back to the synthesizer provider name."""
+    skipped = []
+    for entry in chain:
+        prov = providers.get(entry)
+        if prov is None:
+            skipped.append(entry)
+            continue
+        if prov.family == "anthropic":
+            continue
+        return entry, None
+    reasons = []
+    if skipped:
+        reasons.append(f"chain entries not configured: {', '.join(skipped)}")
+    reasons.append("no configured non-anthropic provider available to act as adversary")
+    warning = (f"Adversary falls back to the synthesizer '{synthesizer_name}' "
+               f"(same family as synthesis) — {'; '.join(reasons)}. "
+               f"Configure a non-anthropic provider for an independent adversary.")
+    return synthesizer_name, warning
+
+
+def load_run_config(toml_paths=None, env=None):
+    """Load the [run] + [slices.*] tables into a RunConfig.
+
+    Mirrors load_config's injectable signature. Honors DEEP_RESEARCH_CONFIG (in env)
+    as a TOML source override. Absent [run] ⇒ all defaults; invalid mode ⇒ ValueError."""
+    env = dict(os.environ if env is None else env)
+    override = env.get("DEEP_RESEARCH_CONFIG")
+    if override:
+        toml_paths = [Path(override)]
+    elif toml_paths is None:
+        toml_paths = default_toml_paths()
+
+    run: dict = {}
+    slice_tables: dict[str, dict] = {}
+    for path in toml_paths:                          # later paths override earlier
+        data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+        run.update(data.get("run") or {})
+        for sname, t in (data.get("slices") or {}).items():
+            slice_tables[sname] = t
+
+    mode = run.get("mode", "slices")
+    if mode != "slices":
+        raise ValueError(f"invalid run mode '{mode}' — only 'slices' is supported.")
+
+    if slice_tables:
+        slices = {n: _slice_from_table(n, t) for n, t in slice_tables.items()}
+    else:
+        slices = dict(_DEFAULT_SLICES)
+
+    adversary_chain = list(run.get("adversary", ["grok", "chatgpt", "gemini"]))
+    if not adversary_chain:                          # never empty
+        adversary_chain = ["grok", "chatgpt", "gemini"]
+
+    # Adversary selection runs against configured + available providers.
+    providers, _ = load_config(toml_paths, env)
+    defaults = load_defaults(toml_paths)
+    synthesizer = pick_provider(providers, "synthesis", defaults) if providers else None
+    synthesizer_name = synthesizer.name if synthesizer is not None else "claude"
+    adversary, adversary_warning = _resolve_adversary(
+        adversary_chain, providers, synthesizer_name)
+
+    return RunConfig(
+        mode=mode,
+        max_retrieval_usd=float(run.get("max_retrieval_usd", 1.0)),
+        min_evidence_total=int(run.get("min_evidence_total", 10)),
+        min_nonempty_slices=int(run.get("min_nonempty_slices", 2)),
+        slices=slices,
+        adversary_chain=adversary_chain,
+        adversary=adversary,
+        synthesizer=synthesizer_name,
+        adversary_warning=adversary_warning,
+    )
