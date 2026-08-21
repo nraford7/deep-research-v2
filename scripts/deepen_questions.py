@@ -80,8 +80,8 @@ _CAP = 9
 # truth is scripts/cost.py — never hardcode $0.04 here.
 DEEPEN_WORST_CASE = RETRIEVAL_FEES["deep_reasoning"] * RETRY_MULTIPLIER
 
-# Honesty system prompt — inlined from dispatch.py's old SHARED_RULES spirit.
-# Never fabricate; mark unverified; cite real sources only.
+# Honesty system prompt for deep-reasoning calls.
+# Never fabricate sources/URLs/quotes; mark unverified; cite real sources only.
 HONESTY = (
     "You are a rigorous research agent. Follow these integrity rules WITHOUT "
     "exception. (1) NO FABRICATION: never invent sources, URLs, quotes, "
