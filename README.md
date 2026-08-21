@@ -1,41 +1,40 @@
 # deep-research
 
-Five research strategies run in parallel — each by a provider you configure — with domain scoping, adversarial cross-validation, and mechanical citation verification. A Claude Code skill that runs five agent types (academic, practitioner, real-time, grey-literature, contrarian) against the same topic with differentiated strategies, compares their outputs adversarially, integrates them by topic section, verifies every citation against OpenAlex/Crossref, and runs an optional iterative deepening pass. Produces a fact-checked, fully-cited "Research Bible" plus BibTeX and a machine-readable claims file.
+Retrieval-first deep research — a real evidence corpus fetched with Exa search slices, a hard evidence gate that refuses to synthesize over thin material, question-driven deepening, mechanical citation verification, and a different-provider adversary. A Claude Code skill that scopes the domain, retrieves a fetched corpus (Exa slices + a free academic anchor), synthesizes over that evidence, chases root-cause / consequence / gap questions, integrates by topic section, verifies every citation against OpenAlex/Crossref, and lets an independent adversary try to refute the draft. Produces a fact-checked, fully-cited "Research Bible" plus BibTeX and a machine-readable claims file.
 
 ## What it does
 
-Most LLM research is one model, one pass, hallucinated citations. This is five research strategies in parallel — each via a configured provider — six rounds, mechanical citation resolution, and budget-aware execution.
+Most LLM research is one model, one pass, hallucinated citations. This is retrieval-first: fetch the evidence, gate on it, reason over it — never over the model's memory.
 
 ```
-Round 0  Domain scoping — classify topic, propose source priorities
-Round 1  Five agent types research in parallel — each with a different strategy
-         ├─ academic         (default: Claude)      → Academic deep dive (journals, NBER, SSRN)
-         ├─ practitioner     (default: ChatGPT)     → Practitioner & explainer (industry, methodology)
-         ├─ real-time        (default: Perplexity)  → Real-time web (current news, live citations)
-         ├─ grey-literature  (default: Gemini)      → Grey literature & primary sources (govt, IGO, treaties)
-         └─ contrarian       (default: Grok)        → Contrarian & cross-disciplinary (dissent, outside views)
-Round 2  Adversarial comparison + citation-laundering detection + completeness map
-Round 3  Three section planners + reconciler → parallel integration agents
-Round 4  Mechanical citation verification (Crossref/OpenAlex) + source tier audit
-         + missing-literature check + adversarial fact-check + fix pass
-Round 5  (optional) Iterative deepening on weak sections, cap 2 iterations
-Index    Refresh a project-wide semantic index over every topic's Bible (bundled)
-Output   Hub-and-spoke Research Bible + BibTeX + claims.jsonl + provenance
-         + searchable semantic index spanning every topic in the project
+Round 0    Domain scoping — classify topic, propose source priorities
+Round 1    Exa retrieval slices + a free OpenAlex/Semantic Scholar academic anchor
+             → evidence gate: MUST pass before any synthesis (thin corpus is refused)
+Round 2    Synthesis over the fetched corpus — six exact question-bucket headers
+Round 2.5  Question-driven deepening — root-cause / consequence / gap (Exa deep-reasoning)
+Round 3    Section planners + reconciler → parallel integration agents + dedup bibliography
+Round 4    Mechanical citation verification (Crossref/OpenAlex) + three-state SSRF-hardened
+             link probe + a refute-mode adversary on a different provider family + fix pass
+Round 5    (optional) Targeted rerun of a single slice or question, then re-integrate
+Index      Refresh a project-wide semantic index over every topic's Bible (bundled)
+Output     Hub-and-spoke Research Bible + BibTeX + claims.jsonl + provenance
+             + searchable semantic index spanning every topic in the project
 ```
 
 ## What's new vs. a one-shot LLM
 
+- **Retrieval-first** — Round 1 fetches a real evidence corpus with Exa search slices (plus a free OpenAlex/Semantic Scholar academic anchor); later rounds reason over the fetched evidence, not the model's memory
+- **Hard evidence gate** — synthesis is refused (exit 22) unless the corpus clears minimum unique-source and non-empty-slice thresholds and every row re-validates
+- **Question-driven deepening** — root-cause / consequence / gap questions (3/3/3, cap 9) chased with Exa `deep-reasoning`
+- **Ledger-capped retrieval** — a per-run money ledger (default $1) pre-charges each Exa call and reconciles the actual; a cap breach exits 21, never silently retries
 - **Domain scoping** — classifies topic before Round 1, injects domain-specific source priorities (PubMed for medicine, NBER for economics, arXiv for tech, etc.)
 - **Date stamping** — every time-sensitive claim carries `[as of: <date>]`
 - **Confidence tagging** — high-stakes claims carry `[confidence: high/medium/low]`
-- **Cross-model support tags** — `[4/5 support]` shows how many models agree on a claim
-- **Citation-laundering detection** — flags when N models cite the same secondary source as if it were N confirmations
 - **Mechanical citation verification** — resolves every `[Author, Year]` against OpenAlex and Crossref (free, no key)
+- **Three-state SSRF-hardened link probe** — `--check-urls` reports unresolved / indeterminate-with-reason / truncated, never a naive dead-URL binary
+- **Different-family adversary** — a refute-mode pass forced onto a provider family that differs from the synthesizer's
 - **Source tier audit** — scores bibliography quality (peer-reviewed vs blog vs wiki)
 - **Missing-literature check** — compares against OpenAlex top-N to flag canonical works absent from the bibliography
-- **Multi-language search** — `--languages en,fr,de,zh` finds non-English primary sources
-- **Cost gate + resume** — pre-flight estimate, `--max-cost-usd` hard cap, `--resume` recovers from partial failure
 - **BibTeX + JSONL export** — machine-readable downstream consumption
 - **Bundled semantic search** — the engine is bundled in this repo (`vendor/semantic_search/`); after each run, one project-wide index over every topic's Bible makes the whole research library searchable by meaning. Opt-in deps (`pip install -r requirements-search.txt`); skips gracefully (exit 0 + notice) if deps or `OPENAI_API_KEY` are absent — never breaks a run.
 
@@ -43,7 +42,7 @@ Output   Hub-and-spoke Research Bible + BibTeX + claims.jsonl + provenance
 
 ```bash
 # 1. Clone into your Claude skills directory
-git clone https://github.com/nraford7/deep-research.git ~/.claude/skills/deep-research
+git clone https://github.com/nraford7/deep-research-v2.git ~/.claude/skills/deep-research
 
 # 2. Install Python deps
 pip install -r ~/.claude/skills/deep-research/requirements.txt
@@ -57,7 +56,7 @@ pip install -r ~/.claude/skills/deep-research/requirements-search.txt
 # needs OPENAI_API_KEY; without this step search just skips gracefully
 ```
 
-The skill auto-detects which keys are set. Missing keys = that model skipped, no failure. **One key works. Three or more is the sweet spot. Five is maximum.**
+Retrieval needs `EXA_API_KEY`. The skill auto-detects which LLM keys are set and only calls providers you've configured; a missing LLM key just narrows the reasoning options — synthesis and integration prefer the Claude Code session's own $0 subagent when available.
 
 ## Use
 
@@ -67,50 +66,51 @@ In Claude Code:
 /deep-research [your topic and scope]
 ```
 
-The skill walks the agent through all six rounds. Or invoke the dispatcher and helper scripts directly:
+The skill walks the agent through every round. Or invoke the dispatcher and helper scripts directly (retrieval-first — Round 1 fetches the corpus, the gate must pass before synthesis):
 
 ```bash
+RUN=research/cbdc
+TOPIC="Central bank digital currencies"
+
 # 1. Domain scoping
-python3 scripts/scope.py \
-  --topic "Central bank digital currencies" \
+python3 scripts/scope.py --topic "$TOPIC" \
   --scope "Design, adoption, monetary-policy implications" \
-  --output research/cbdc/round0/scope.md \
-  --use-llm
+  --output "$RUN/scope.json" --use-llm
 
-# 2. Pre-flight cost estimate
-python3 dispatch.py --topic "..." --scope "..." \
-  --output-dir research/cbdc/round1/ \
-  --scope-file research/cbdc/round0/scope.json \
-  --estimate-only
+# 2. Print the Round-1 command sequence (dispatch.py is a slices-only guide, not a runner)
+python3 dispatch.py --topic "$TOPIC" \
+  --scope "Design, adoption, monetary-policy implications" \
+  --run-dir "$RUN" --max-retrieval-usd 1
 
-# 3. Round 1 dispatch with budget cap
-python3 dispatch.py --topic "..." --scope "..." \
-  --output-dir research/cbdc/round1/ \
-  --scope-file research/cbdc/round0/scope.json \
-  --languages en,zh \
-  --max-cost-usd 50 \
-  --resume
+# 3. Round 1 retrieval — Exa slices + free academic anchor
+python3 scripts/slice_search.py --run-dir "$RUN" --topic "$TOPIC" --max-retrieval-usd 1
 
-# 4. Bibliography dedup (after Round 3 integration)
-python3 scripts/dedup_bib.py research/cbdc/round1/agent-*.md \
-  --output research/cbdc/sections/bibliography.md
+# 4. Evidence gate — MUST exit 0 before any synthesis (exit 22 = thin corpus)
+python3 scripts/evidence_gate.py --run-dir "$RUN"
 
-# 5. Round 4 mechanical verification
-python3 scripts/verify_citations.py research/cbdc/sections/ \
-  --output research/cbdc/round4/citation-verification.md --check-urls
-python3 scripts/classify_sources.py research/cbdc/sections/bibliography.md \
-  --output research/cbdc/round4/tier-report.md
+# → Round 2 synthesis subagent → $RUN/round2/synthesis.md (six exact headers)
+
+# 5. Round 2.5 deepening — root-cause / consequence / gap
+python3 scripts/deepen_questions.py --run-dir "$RUN" --round2-file "$RUN/round2/synthesis.md"
+
+# → Round 3 integration → $RUN/sections/
+
+# 6. Bibliography dedup (after integration)
+python3 scripts/dedup_bib.py "$RUN"/round1/brief_*.md \
+  --output "$RUN/sections/bibliography.md"
+
+# 7. Round 4 mechanical verification (+ three-state link probe) → then a refute adversary
+python3 scripts/verify_citations.py "$RUN/sections/" \
+  --output "$RUN/round4/citation-verification.md" --check-urls
+python3 scripts/classify_sources.py "$RUN/sections/bibliography.md" \
+  --output "$RUN/round4/tier-report.md"
 python3 scripts/lit_search.py --topic "CBDC monetary policy" --limit 50 \
-  --compare-bib research/cbdc/sections/bibliography.md \
-  --output research/cbdc/round4/missing-lit.md
+  --compare-bib "$RUN/sections/bibliography.md" \
+  --output "$RUN/round4/missing-lit.md"
 
-# 6. Export
-python3 scripts/export.py \
-  --sections research/cbdc/sections/ \
-  --bibliography research/cbdc/sections/bibliography.md \
-  --output-dir research/cbdc/export/
-
-# 7. Refresh the project-wide semantic index (bundled; over every topic's Bible)
+# 8. Export + refresh the project-wide semantic index (bundled; over every topic's Bible)
+python3 scripts/export.py --sections "$RUN/sections/" \
+  --bibliography "$RUN/sections/bibliography.md" --output-dir "$RUN/export/"
 python3 scripts/search.py index
 ```
 
@@ -139,9 +139,9 @@ print a one-line notice and exit 0 — core research is unaffected.
 
 | Env var | Purpose | Get a key |
 |---|---|---|
+| `EXA_API_KEY` | Exa retrieval (Round 1 slices + Round 2.5 deepening) — **required** | https://dashboard.exa.ai |
 | `ANTHROPIC_API_KEY` | Claude | https://console.anthropic.com |
 | `OPENAI_API_KEY` | ChatGPT | https://platform.openai.com |
-| `PERPLEXITY_API_KEY` | Perplexity Deep Research | https://www.perplexity.ai/settings/api |
 | `GOOGLE_API_KEY` | Gemini | https://aistudio.google.com/apikey |
 | `XAI_API_KEY` | Grok | https://console.x.ai |
 | `SEMANTIC_SCHOLAR_KEY` | Optional — raises rate limit on `lit_search.py` | https://www.semanticscholar.org/product/api |
@@ -166,8 +166,11 @@ Providers can also be local CLI tools (`api_type = "cli"`) — for example `clau
 | Script | Purpose |
 |---|---|
 | `scripts/scope.py` | Domain classification + source priority recommendations (rule-based + optional Claude) |
-| `scripts/cost.py` | Cost estimator with budget gate |
-| `scripts/verify_citations.py` | Resolve every citation against OpenAlex + Crossref; flag unresolved, weak matches, orphans, dead URLs |
+| `scripts/slice_search.py` | Round-1 retrieval: Exa search slices + a free academic anchor; ledger-capped; writes jsonl briefs + manifest |
+| `scripts/evidence_gate.py` | Refuse synthesis over a thin corpus — exit 0 if thick enough and every row re-validates, else exit 22 |
+| `scripts/deepen_questions.py` | Round 2.5 deepening: root-cause / consequence / gap questions answered with Exa deep-reasoning |
+| `scripts/cost.py` | Cost estimator + retrieval fee table |
+| `scripts/verify_citations.py` | Resolve every citation against OpenAlex + Crossref; flag unresolved / weak matches / orphans; `--check-urls` runs a three-state SSRF-hardened link probe |
 | `scripts/dedup_bib.py` | DOI-normalized + fuzzy-title bibliography merge with audit log |
 | `scripts/classify_sources.py` | Tier classifier (peer-reviewed / institutional / book / news / blog / wiki) + quality score |
 | `scripts/lit_search.py` | Query OpenAlex + Semantic Scholar; optionally compare against finished bibliography to flag missing canonical works |
@@ -197,14 +200,14 @@ research/
     └── round0..round5/            ← Provenance preserved
 ```
 
-## Why five strategies, not one
+## Why retrieval-first, not memory-first
 
-- **Hallucination triangulation** — a fake citation rarely appears in three reports from different providers
-- **Mechanical backstop** — `verify_citations.py` resolves every cite against OpenAlex/Crossref; what agents invent, the resolver catches
-- **Coverage** — each agent type has a different strategy and each provider has different blind spots; cross-section completeness map exposes them
-- **Citation quality** — Perplexity finds live web sources, Gemini surfaces primary documents, Claude follows academic citation chains
-- **Disagreement is signal** — when providers split on a figure, that becomes a `[disputed: ...]` tag, not a silent average
-- **Citation laundering caught** — Round 2 flags when N agents cite the same secondary source as if it were N confirmations
+- **Fetched evidence, not recall** — Round 1 retrieves a real corpus with Exa slices + a free academic anchor; synthesis reasons over what was fetched, so a claim traces to a source that actually exists
+- **Refusal beats confident thin answers** — the evidence gate blocks synthesis over a thin corpus (exit 22) instead of letting a model paper over the gap
+- **Mechanical backstop** — `verify_citations.py` resolves every cite against OpenAlex/Crossref; what a draft invents, the resolver catches
+- **Chase the questions, not just the topic** — deepening splits root-cause / consequence / gap questions and answers each with targeted Exa deep-reasoning
+- **Independent critique** — the refute-mode adversary runs on a provider family that differs from the synthesizer's, so the review is not an echo chamber
+- **Disagreement is signal** — differing figures become a `[disputed: ...]` tag, never a silent average
 
 See `SKILL.md` for the full architecture, prompt templates, and failure modes.
 
@@ -228,7 +231,7 @@ Hardening from a large real run (a ~28k-word, 130+-source Research Bible):
   previously killed the academic agent outright).
 - **GPT-5 / o-series support.** `_complete_openai` sends `max_completion_tokens` for
   `gpt-5*`/`o1`/`o3`/`o4` models (which reject `max_tokens`) and `max_tokens` for everything
-  else (gpt-4.x, Perplexity, Grok). You can now set a GPT-5 model as a provider without a 400.
+  else (gpt-4.x, Grok). You can now set a GPT-5 model as a provider without a 400.
 - **Bibliography parser is format-tolerant.** `extract_bibliography` (used by
   `verify_citations.py` and `dedup_bib.py`) now matches any heading that *contains*
   "bibliography/references/works cited/sources" (e.g. `# Master Bibliography`), keeps deeper

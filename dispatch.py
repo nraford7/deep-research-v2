@@ -67,7 +67,7 @@ def main():
                  "--topic", args.topic, "--scope", args.scope,
                  "--output", str(run_dir / "scope.json")]
     slice_cmd = ["python3", "scripts/slice_search.py",
-                 "--run-dir", str(run_dir)] + cap_arg
+                 "--topic", args.topic, "--run-dir", str(run_dir)] + cap_arg
     gate_cmd = ["python3", "scripts/evidence_gate.py",
                 "--run-dir", str(run_dir)]
 
