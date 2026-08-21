@@ -119,6 +119,45 @@ DOMAIN_RULES = {
 }
 
 
+# Small static prose → institutional-hostname table. When a common institution is
+# named in the topic/scope (or in the LLM proposal's priority_sources), we can offer
+# a concrete `include_domains` hint for Round-1 retrieval without a network call.
+INSTITUTION_DOMAINS: dict[str, str] = {
+    "rand": "rand.org",
+    "brookings": "brookings.edu",
+    "oecd": "oecd.org",
+    "world bank": "worldbank.org",
+    "imf": "imf.org",
+    "united nations": "un.org",
+    "chatham house": "chathamhouse.org",
+    "council on foreign relations": "cfr.org",
+    "cfr": "cfr.org",
+    "nber": "nber.org",
+    "cepr": "cepr.org",
+    "peterson institute": "piie.com",
+    "piie": "piie.com",
+    "carnegie": "carnegieendowment.org",
+    "iea": "iea.org",
+    "bis": "bis.org",
+    "who": "who.int",
+    "sipri": "sipri.org",
+    "iiss": "iiss.org",
+    "pew": "pewresearch.org",
+}
+
+
+def infer_domains(*texts: str) -> list[str]:
+    """Map any institution named across the given texts to its hostname (a small,
+    offline, static lookup). Returns a de-duplicated, order-stable list. This is the
+    prose→domain table backing scope.py's optional `domains` output field."""
+    blob = " ".join(t for t in texts if t).lower()
+    seen: list[str] = []
+    for key, host in INSTITUTION_DOMAINS.items():
+        if re.search(rf"\b{re.escape(key)}\b", blob) and host not in seen:
+            seen.append(host)
+    return seen
+
+
 def classify_topic(topic: str, scope: str = ""):
     text = f"{topic} {scope}".lower()
     scores = {}
@@ -170,7 +209,12 @@ def llm_proposal(topic: str, scope: str, toml_paths=None):
         "You are a research methodologist. Given a topic and scope, identify the primary "
         "academic domain(s) and propose specific source priorities. Output JSON only: "
         '{"primary_domain": str, "secondary_domains": [str], "priority_sources": [str], '
-        '"weight_against": [str], "must_check": str, "search_keywords": [str]}'
+        '"weight_against": [str], "must_check": str, "search_keywords": [str], '
+        '"domains": [str], "fresh_since": "YYYY-MM-DD"}. '
+        'The last two are OPTIONAL: "domains" is a list of authoritative institutional '
+        'hostnames to weight Round-1 retrieval toward (e.g. rand.org, oecd.org); '
+        '"fresh_since" is an ISO date to bound recent-news retrieval when the topic is '
+        "time-sensitive. Omit either field if not clearly applicable."
     )
     user = f"Topic: {topic}\nScope: {scope}\n\nReturn JSON only."
     try:
@@ -237,6 +281,23 @@ def main():
         llm = llm_proposal(args.topic, args.scope)
         if llm:
             payload["llm_proposal"] = llm
+
+    # Optional (back-compatible) domains/fresh_since hints for Round-1 retrieval.
+    # Prefer an explicit LLM proposal; otherwise back-fill domains from the static
+    # prose→domain table over topic + scope + rule-based priority sources. Absent is
+    # fine — slice_search treats these as optional.
+    prop = payload.get("llm_proposal") or {}
+    domains = list(prop.get("domains") or [])
+    if not domains:
+        # Back-fill only from what the user actually wrote (topic + scope). We do NOT
+        # mine the generic rule-based priority-source boilerplate — that would emit
+        # institutional domains for every economics/policy topic and drown the signal.
+        domains = infer_domains(args.topic, args.scope)
+    if domains:
+        payload["domains"] = domains
+    fresh_since = prop.get("fresh_since")
+    if fresh_since:
+        payload["fresh_since"] = fresh_since
 
     lines = [f"# Domain scoping — {args.topic}", ""]
     if primary:

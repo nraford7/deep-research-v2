@@ -91,6 +91,17 @@ PATTERNS = [
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
 
 
+def tier_of(url: str, venue: str | None = None) -> str:
+    """Thin wrapper over ``classify`` for a retrieval result (URL + optional venue).
+
+    Round-1 slice items arrive as a URL and (sometimes) a venue/source name rather
+    than a formatted bibliography line, so we hand ``classify`` the concatenation of
+    the two and let its existing hint regexes decide the tier. Returns one of
+    classify()'s tiers: peer_reviewed / institutional / preprint / book / news /
+    blog / wiki / unknown."""
+    return classify(f"{venue or ''} {url}")
+
+
 def classify(entry: str) -> str:
     if DOI_RE.search(entry):
         for label, hints in PATTERNS:

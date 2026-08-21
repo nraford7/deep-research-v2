@@ -1,3 +1,5 @@
+import json
+
 from scripts import scope
 import config, llm
 
@@ -47,3 +49,45 @@ def test_llm_proposal_config_error_falls_back(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "load_config", boom)  # raises first; load_defaults never reached
     monkeypatch.setattr(llm, "call_model", _no_call)  # must NOT be called
     assert scope.llm_proposal("T", "S", toml_paths=[tmp_path / "none.toml"]) is None
+
+
+# --- optional domains / fresh_since contract (back-compatible) ---
+
+def test_infer_domains_maps_named_institutions():
+    got = scope.infer_domains("What does RAND say about deterrence?", "compare with OECD")
+    assert "rand.org" in got and "oecd.org" in got
+
+def test_infer_domains_empty_when_no_institution():
+    assert scope.infer_domains("grid-scale battery storage economics") == []
+
+def test_infer_domains_deduplicates_and_is_stable():
+    got = scope.infer_domains("RAND and rand and RAND again", "")
+    assert got == ["rand.org"]
+
+def test_main_writes_inferred_domains(tmp_path):
+    out = tmp_path / "scope.md"
+    import sys as _sys
+    argv = ["scope.py", "--topic", "RAND analysis of deterrence policy", "--output", str(out)]
+    monkey = _sys.argv
+    _sys.argv = argv
+    try:
+        scope.main()
+    finally:
+        _sys.argv = monkey
+    payload = json.loads(out.with_suffix(".json").read_text())
+    assert "rand.org" in payload.get("domains", [])
+    # fresh_since only appears when a proposal supplies it — absent by default.
+    assert "fresh_since" not in payload
+
+def test_main_no_domains_key_when_none(tmp_path):
+    out = tmp_path / "scope.md"
+    import sys as _sys
+    argv = ["scope.py", "--topic", "grid-scale battery storage economics", "--output", str(out)]
+    monkey = _sys.argv
+    _sys.argv = argv
+    try:
+        scope.main()
+    finally:
+        _sys.argv = monkey
+    payload = json.loads(out.with_suffix(".json").read_text())
+    assert "domains" not in payload
