@@ -50,6 +50,8 @@ pip install -r requirements.txt
 ## Architecture: the rounds
 
 ```
+Round -1   FRAME            (default-on, skippable) coach the umbrella question +
+              ↓             sub-questions + scope before any spend — AskUserQuestion
 Round 0    SCOPE            scope.py → scope.json (domain + source priorities)
               ↓
 Round 1    RETRIEVE         slice_search.py → Exa slices (full text) + academic anchor
@@ -67,6 +69,42 @@ Round 5    RERUN (targeted) slice_search --only-slice / deepen --single-question
               ↓
 EXPORT     BibTeX + claims.jsonl + refresh the project-wide semantic index
 ```
+
+## Stage 0: Framing (default-on, skippable)
+
+A badly scoped question wastes the whole run: the framing step is the single
+highest-leverage moment in the pipeline. Before Round 0, coach the user through
+turning a raw ask into a sharp, researchable umbrella question with explicit
+sub-questions and scope. This is a SHORT structured dialog, not a wall of text.
+
+**Run it by default.** Skip ONLY when one of these holds:
+- The invocation already carries a well-formed umbrella question AND scope
+  (e.g. `args` include an explicit question plus sub-threads, as when another
+  skill or a prior chat already did the framing).
+- The user passed a skip signal: `just go`, `skip framing`, `no framing`,
+  `trust the model`, `--no-frame`, or similar.
+
+**When you run it, use ONE `AskUserQuestion` call with ≤3 questions:**
+
+1. **Umbrella question.** Restate the user's raw ask as a candidate umbrella
+   question and offer it as the recommended option, plus 1-2 alternative framings
+   (broader / narrower / different angle). This shows the user the question you
+   will actually research and lets them correct it in one tap.
+2. **Sub-questions / focus.** Propose 3-6 sub-questions the run will deepen, as a
+   multi-select so the user can drop or keep each. Include an "add your own" via
+   the free-text option.
+3. **Scope dials.** One multi-select covering the choices that change retrieval:
+   time window (e.g. last 2 years vs. all), academic-vs-practitioner weighting,
+   geography/language, and depth (single-session vs. exhaustive). Offer sensible
+   defaults as the recommended option.
+
+Then reflect the confirmed framing back in one line and proceed to Round 0,
+threading the umbrella question into `--topic` and the sub-questions + scope into
+`--scope`. Do NOT spend any retrieval budget before this reflection.
+
+If `AskUserQuestion` is unavailable (headless / cron / non-interactive run), skip
+Stage 0 silently and fall back to the raw topic: never block an unattended run
+waiting on input.
 
 ## Round 0 — Scope
 
@@ -432,6 +470,10 @@ python3 scripts/verify_citations.py "$RUN/sections/" --output "$RUN/round4/citat
 
 When `/deep-research [topic]` is invoked:
 
+0. **Stage 0 framing** — unless the ask is already well-framed or the user passed a
+   skip signal, run ONE `AskUserQuestion` (≤3 questions: umbrella question,
+   sub-questions, scope dials); reflect the confirmed framing back before any spend.
+   Skip silently in headless/non-interactive runs.
 1. **Round 0** — `scope.py`; capture `scope.json`.
 2. **Round 1 retrieve** — run `dispatch.py` to print the runnable sequence, then
    `slice_search.py`.
