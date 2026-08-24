@@ -58,6 +58,7 @@ Round 0    SCOPE            scope.py → scope.json (domain + source priorities)
 Round 1    RETRIEVE         slice_search.py → Exa slices (full text) + academic anchor
               ↓             fetch_fulltext.py → read PDFs/pages Exa left thin (incl. OA papers)
               ↓             evidence_gate.py → MUST pass (exit 0) before any synthesis
+              ↓             citation_chase.py → one-hop citation graph fill (co-citation + citing works), re-gate
               ↓             coverage_audit.py → name expected-but-absent coverage, fill the gaps, re-gate
 Round 2    SYNTHESIZE       compare the corpus; emit the six EXACT headers (4 feed buckets)
               ↓
@@ -214,6 +215,31 @@ Every fetch goes through the SSRF-hardened, IP-pinned path reused from
 never ledgered; **no WebFetch** (raw bytes read directly). Writes
 `round1/fulltext_manifest.json` (attempted / fetched / by-method / failures).
 Requires `pypdf` (in `requirements.txt`); without it, PDF rows skip gracefully.
+
+**Step 1.4b · citation chase (run after the gate passes, before the coverage audit).**
+This does evidence-grounded graph fill FIRST, so the model-memory coverage auditor then
+reasons over the enlarged corpus. It walks one hop out of the Round-1 seeds purely from
+the citation graph, never from an LLM: BACKWARD co-citation (works many seeds reference in
+common) plus a small FORWARD pass (newer works that cite the strongest seeds). New works
+are de-duped against the corpus, written to `round1/slice_citation.jsonl`, then
+full-text-fetched and re-gated.
+
+```bash
+python3 scripts/citation_chase.py \
+  --run-dir research/[slug] \
+  --topic "Your topic"
+```
+
+**Fail-CLOSED exit codes (read them before proceeding).** Exit `0` means the chase RAN:
+it either expanded the corpus or found nothing new after dedupe · in both cases proceed.
+A NONZERO exit means the chase could NOT complete, and you must NOT proceed as if
+expansion succeeded: surface the code and resolve it before the coverage audit.
+- `40`: every OpenAlex request failed (network unreachable) · the chase could not run.
+- `41`: no seed yielded a resolvable OpenAlex id or references · nothing to chase.
+- `22`: the re-gate found the corpus STILL too thin / a row failed re-validation.
+Any nonzero code means the enlarged corpus is unverified: surface it, resolve it (restore
+network, broaden the seed corpus, re-fetch), and only continue to the coverage audit once
+the chase returns `0`.
 
 **Step 1.5 · coverage audit (run after the gate passes).** The gate asks "is the
 corpus thick enough?"; this asks a different question: "for THIS scope, what coverage a
@@ -627,6 +653,7 @@ python3 scripts/scope.py --topic "$TOPIC" --scope "LCOE trends, chemistry mix, c
 python3 scripts/slice_search.py --run-dir "$RUN" --topic "$TOPIC" --max-retrieval-usd 1
 python3 scripts/evidence_gate.py --run-dir "$RUN"        # must exit 0 before synthesis
 python3 scripts/fetch_fulltext.py --run-dir "$RUN"       # read PDFs/OA papers Exa left thin
+python3 scripts/citation_chase.py --run-dir "$RUN" --topic "$TOPIC"   # one-hop citation-graph fill, re-gate (fail-closed: 0 ran · 40 OpenAlex unreachable · 41 no resolvable seeds · 22 still-thin → surface, don't proceed as if expansion succeeded)
 python3 scripts/coverage_audit.py --run-dir "$RUN" --topic "$TOPIC"   # name + fill expected-but-absent coverage, re-gate
 # → Round 2 synthesis subagent (emit the six EXACT headers) → round2/synthesis.md
 python3 scripts/deepen_questions.py --run-dir "$RUN" --round2-file "$RUN/round2/synthesis.md"
@@ -649,18 +676,22 @@ When `/deep-research [topic]` is invoked:
    `slice_search.py`.
 3. **Evidence gate** — `evidence_gate.py`; **exit 0 required** before any synthesis
    (exit 22 → fix corpus + `--resume` + re-gate; exit 21 → raise cap, surface, resume).
-4. **Coverage audit:** `coverage_audit.py --run-dir … --topic …`; name expected-but-absent
+4. **Citation-graph fill:** `citation_chase.py --run-dir … --topic …`; one-hop co-citation +
+   citing-works expansion, then re-gate. Fail-closed exits: 0 = ran; 40 = OpenAlex unreachable;
+   41 = no resolvable seeds; 22 = still thin. On any non-zero, surface the code, do NOT proceed
+   as if expansion succeeded.
+5. **Coverage audit:** `coverage_audit.py --run-dir … --topic …`; name expected-but-absent
    coverage, fill the gaps, re-gate (graceful exit 21 on cap breach).
-5. **Round 2 synthesis** — one subagent; emit the six EXACT headers to `round2/synthesis.md`.
-6. **Round 2.5 deepening** — `deepen_questions.py --round2-file …`.
-7. **Round 3 integration** — read round1 briefs + `sources/*.txt` + `round2/synthesis.md`
+6. **Round 2 synthesis** — one subagent; emit the six EXACT headers to `round2/synthesis.md`.
+7. **Round 2.5 deepening** — `deepen_questions.py --round2-file …`.
+8. **Round 3 integration** — read round1 briefs + `sources/*.txt` + `round2/synthesis.md`
    + round2.5 answers; planners + parallel section subagents + `dedup_bib.py`; assemble + audit.
-8. **Round 4** — `verify_citations.py --check-urls` (+ `classify_sources.py`,
+9. **Round 4** — `verify_citations.py --check-urls` (+ `classify_sources.py`,
    `lit_search.py --compare-bib`) → `lint_background.py research/[slug]/sections/`
    (fix/re-fence flagged blocks) → refute adversary (non-anthropic family) → fix pass.
-9. **Round 5 (optional)** — `slice_search --only-slice` / `deepen --single-question`; re-integrate.
-10. **Export** — `export.py`, then `search.py index`.
-11. **Report** — file location, stats, citation-resolution rate, and the index summary line.
+10. **Round 5 (optional)** — `slice_search --only-slice` / `deepen --single-question`; re-integrate.
+11. **Export** — `export.py`, then `search.py index`.
+12. **Report** — file location, stats, citation-resolution rate, and the index summary line.
 
 ## Common Failure Modes
 

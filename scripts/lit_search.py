@@ -46,6 +46,34 @@ def _make_session():
     return s
 
 
+class OpenAlexError(Exception):
+    """Raised when an OpenAlex HTTP request returns a non-ok status (4xx/5xx).
+
+    A valid query that returns zero results is r.ok True with an empty list and
+    does NOT raise; only a transport/server error (not r.ok) raises. Callers that
+    must fail closed on a real outage (citation_chase's oa_failures counter) can
+    catch this to distinguish a genuine empty result from an unreachable API."""
+    pass
+
+
+def _bare_openalex_id(x):
+    """OpenAlex ids come back as full URLs (https://openalex.org/W123). Filters
+    and dedupe keys need the bare tail form (W123)."""
+    return str(x).rsplit("/", 1)[-1]
+
+
+def _is_doi_input(x):
+    """True when an id string is a DOI (or a doi.org URL), NOT an OpenAlex W-id.
+    DOI inputs must never be run through _bare_openalex_id (which would mangle a
+    DOI's slashes into a bare tail and 400 the whole batch)."""
+    s = str(x or "").strip().lower()
+    if not s:
+        return False
+    if "doi.org" in s:
+        return True
+    return bool(re.search(r"10\.\d{4,9}/", s))
+
+
 def _normalize_doi(value):
     if not value:
         return ""
@@ -91,6 +119,7 @@ def query_openalex(topic: str, limit: int = 50):
                 "cited_by": w.get("cited_by_count"),
                 "doi": w.get("doi"),
                 "id": w.get("id"),
+                "referenced_works": w.get("referenced_works") or [],
                 "authors": [a.get("author", {}).get("display_name") for a in authorships[:5]],
                 "institution": institution,
                 "type": w.get("type"),
@@ -100,6 +129,155 @@ def query_openalex(topic: str, limit: int = 50):
         if len(results) >= limit:
             break
     return results[:limit]
+
+
+def _openalex_work_to_dict(w):
+    """Map a raw OpenAlex work record to the same dict shape query_openalex
+    produces."""
+    authorships = w.get("authorships") or []
+    institution = None
+    if authorships:
+        insts = (authorships[0] or {}).get("institutions") or []
+        if insts:
+            institution = (insts[0] or {}).get("display_name")
+    return {
+        "title": (w.get("title") or "").strip(),
+        "year": w.get("publication_year"),
+        "cited_by": w.get("cited_by_count"),
+        "doi": w.get("doi"),
+        "id": w.get("id"),
+        "referenced_works": w.get("referenced_works") or [],
+        "authors": [a.get("author", {}).get("display_name") for a in authorships[:5]],
+        "institution": institution,
+        "type": w.get("type"),
+        "venue": (w.get("host_venue") or {}).get("display_name") or ((w.get("primary_location") or {}).get("source") or {}).get("display_name"),
+        "source": "openalex",
+    }
+
+
+def openalex_cites(work_ids, limit: int = 25):
+    """Return the works that CITE ANY of ``work_ids``, most-cited first — the
+    forward candidate pool for citation_chase in ONE (or few) batched requests.
+
+    ``work_ids`` accepts either a single id string OR a list of ids (each a full
+    OpenAlex URL or a bare W-id); it is normalized to a list and reduced to bare
+    W-ids for the filter. Ids are OR'd via filter=cites:W1|W2|... (pipe = OR),
+    at most 50 ids per request; >50 seeds are split across ceil(#ids/50) calls.
+    ``limit`` bounds the total works returned across all batches.
+
+    A real HTTP error RAISES OpenAlexError (fail closed) so citation_chase counts
+    it as a failed OpenAlex attempt (exit 40), never a silent empty result."""
+    if isinstance(work_ids, str):
+        work_ids = [work_ids]
+    bare = []
+    seen = set()
+    for x in work_ids or []:
+        b = _bare_openalex_id(x)
+        if b and b not in seen:
+            seen.add(b)
+            bare.append(b)
+    if not bare:
+        return []
+    s = _make_session()
+    s.headers.update({"User-Agent": f"deep-research/1.0 (mailto:{CONTACT})"})
+    out = []
+    batches = 0
+    failed = 0
+    for i in range(0, len(bare), 50):
+        batches += 1
+        batch = bare[i:i + 50]
+        try:
+            r = s.get(f"{OPENALEX}/works", params={
+                "filter": f"cites:{'|'.join(batch)}",
+                "sort": "cited_by_count:desc",
+                "per-page": limit,
+                "mailto": CONTACT,
+            }, timeout=30)
+        except requests.RequestException:
+            # Transport error on this batch — partial-tolerant: record it as a
+            # failed batch and CONTINUE the remaining batches.
+            failed += 1
+            continue
+        if not r.ok:
+            # Partial-tolerant fail: a real HTTP error on ONE batch is recorded
+            # and the loop continues. Only a TOTAL outage (every batch failed)
+            # raises below, so citation_chase counts it as exit 40; a partial
+            # outage returns whatever succeeded and does NOT trigger a false 40.
+            failed += 1
+            continue
+        out.extend(_openalex_work_to_dict(w) for w in (r.json().get("results") or []))
+    # Raise ONLY on a total outage (every batch failed). One batch of ids means
+    # this preserves S2's behavior: a genuine total non-ok still raises.
+    if batches and failed == batches:
+        raise OpenAlexError(f"OpenAlex cites: all {batches} batch(es) failed")
+    return out[:limit]
+
+
+def openalex_works_by_id(ids):
+    """Hydrate metadata for many OpenAlex ids OR DOIs. Inputs are split into two
+    groups so a DOI never poisons a W-id batch:
+
+      * W-ids  → filter=openalex_id:W1|W2|... (bare tail form, <=50/call)
+      * DOIs   → filter=doi:10.x/a|10.y/b|... (normalized, <=50/call)
+
+    A DOI must NEVER be run through _bare_openalex_id (rsplit on "/" mangles the
+    DOI into a bare tail like `physrevlett.116.061102`, which 400s the WHOLE batch
+    and loses every valid W-id seed batched alongside it). Result sets are merged.
+    HTTP requests are bounded by ceil(#Wids/50) + ceil(#DOIs/50), never one per id.
+    """
+    bare = []
+    seen_bare = set()
+    dois = []
+    seen_doi = set()
+    for x in ids or []:
+        if _is_doi_input(x):
+            d = _normalize_doi(x)
+            if d and d not in seen_doi:
+                seen_doi.add(d)
+                dois.append(d)
+        else:
+            b = _bare_openalex_id(x)
+            if b and b not in seen_bare:
+                seen_bare.add(b)
+                bare.append(b)
+    if not bare and not dois:
+        return []
+    s = _make_session()
+    s.headers.update({"User-Agent": f"deep-research/1.0 (mailto:{CONTACT})"})
+    out = []
+    # Partial-tolerant batching (G5): each batch is attempted independently. A
+    # batch that errors is recorded as failed and the loop CONTINUES the other
+    # batches, so an early success is never discarded when a later batch fails.
+    # We raise OpenAlexError ONLY when EVERY batch failed (a total outage); the
+    # caller (citation_chase) treats a raise as a total failure → exit 40 and a
+    # partial return as NOT a total failure (no false exit 40). A single-batch
+    # total non-ok still raises, preserving S2's fail-closed behavior.
+    counts = {"batches": 0, "failed": 0}
+
+    def _run_batches(values, filter_key):
+        for i in range(0, len(values), 50):
+            counts["batches"] += 1
+            batch = values[i:i + 50]
+            try:
+                r = s.get(f"{OPENALEX}/works", params={
+                    "filter": f"{filter_key}:{'|'.join(batch)}",
+                    "per-page": 50,
+                    "mailto": CONTACT,
+                }, timeout=30)
+            except requests.RequestException:
+                counts["failed"] += 1
+                continue
+            if not r.ok:
+                counts["failed"] += 1
+                continue
+            out.extend(_openalex_work_to_dict(w) for w in (r.json().get("results") or []))
+
+    _run_batches(bare, "openalex_id")
+    _run_batches(dois, "doi")
+    if counts["batches"] and counts["failed"] == counts["batches"]:
+        raise OpenAlexError(
+            f"OpenAlex works_by_id: all {counts['batches']} batch(es) failed")
+    return out
 
 
 def query_semantic_scholar(topic: str, limit: int = 50):

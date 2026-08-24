@@ -88,6 +88,12 @@ python3 scripts/slice_search.py --run-dir "$RUN" --topic "$TOPIC" --max-retrieva
 # 4. Evidence gate — MUST exit 0 before any synthesis (exit 22 = thin corpus)
 python3 scripts/evidence_gate.py --run-dir "$RUN"
 
+# 4a. Citation chase: one-hop citation-graph fill (co-citation + citing works),
+#     then re-gate. Exit 0 = ran (expanded or nothing new); a NONZERO exit (40
+#     OpenAlex unreachable, 41 no resolvable seeds, 22 still thin) means it could
+#     not complete: do NOT proceed as if expansion succeeded, surface and resolve.
+python3 scripts/citation_chase.py --run-dir "$RUN" --topic "$TOPIC"
+
 # 4b. Coverage audit: name + fill expected-but-absent coverage, then re-gate.
 #     Exit 0 = coverage verified; a NONZERO exit (30 no provider, 31 LLM error,
 #     32 bad JSON, 21 cap, 22 still thin) means coverage is UNVERIFIED: do NOT
@@ -177,6 +183,7 @@ Providers can also be local CLI tools (`api_type = "cli"`) — for example `clau
 | `scripts/scope.py` | Domain classification + source priority recommendations (rule-based + optional Claude) |
 | `scripts/slice_search.py` | Round-1 retrieval: Exa search slices + a free academic anchor; ledger-capped; writes jsonl briefs + manifest |
 | `scripts/evidence_gate.py` | Refuse synthesis over a thin corpus — exit 0 if thick enough and every row re-validates, else exit 22 |
+| `scripts/citation_chase.py` | Post-gate one-hop citation-graph fill: backward co-citation + a small forward citing-works pass, deduped against the corpus, written to `slice_citation.jsonl`, then re-gated. Fail-closed: exit 0 = ran (expanded or nothing new), nonzero (40 OpenAlex unreachable, 41 no resolvable seeds, 22 still thin) = could not complete, do not proceed as if expansion succeeded |
 | `scripts/coverage_audit.py` | Post-gate coverage auditor: name expected-but-absent coverage, fill each gap with a scope-bounded Exa slice, re-gate. Fail-closed: exit 0 = coverage verified, nonzero (30/31/32/21/22) = unverified, do not synthesize |
 | `scripts/lint_background.py` | Round-4 numeric tripwire inside fenced editorial blocks: exit 0 clean, exit 1 if a fenced block names a quantity |
 | `scripts/deepen_questions.py` | Round 2.5 deepening: root-cause / consequence / gap questions answered with Exa deep-reasoning |

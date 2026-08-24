@@ -349,6 +349,15 @@ def _anchor_item(work):
         item["h_index"] = work.get("h_index")
     if work.get("institution"):
         item["institution"] = work.get("institution")
+    # Citation-graph provenance from the OpenAlex work, when carried. Bare W-form
+    # so downstream filters and dedupe keys match. Additive; the gate only reads
+    # url + tier, so this stays gate-safe.
+    oa_id = work.get("id")
+    if oa_id:
+        item["openalex_id"] = str(oa_id).rsplit("/", 1)[-1]
+    refs = work.get("referenced_works")
+    if refs:
+        item["referenced_works"] = [str(r).rsplit("/", 1)[-1] for r in refs]
     # Descriptor sub-classification (sub / standing / stance) — merged so the tag
     # can surface advocacy / unverified standing for institutional anchors.
     desc = descriptors_of(f"{venue or ''} {url}", tier)
