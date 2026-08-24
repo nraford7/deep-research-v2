@@ -79,13 +79,20 @@ def query_openalex(topic: str, limit: int = 50):
         if not r.ok:
             break
         for w in r.json().get("results", []):
+            authorships = w.get("authorships") or []
+            institution = None
+            if authorships:
+                insts = (authorships[0] or {}).get("institutions") or []
+                if insts:
+                    institution = (insts[0] or {}).get("display_name")
             results.append({
                 "title": (w.get("title") or "").strip(),
                 "year": w.get("publication_year"),
                 "cited_by": w.get("cited_by_count"),
                 "doi": w.get("doi"),
                 "id": w.get("id"),
-                "authors": [a.get("author", {}).get("display_name") for a in (w.get("authorships") or [])[:5]],
+                "authors": [a.get("author", {}).get("display_name") for a in authorships[:5]],
+                "institution": institution,
                 "type": w.get("type"),
                 "venue": (w.get("host_venue") or {}).get("display_name") or ((w.get("primary_location") or {}).get("source") or {}).get("display_name"),
                 "source": "openalex",
@@ -105,7 +112,7 @@ def query_semantic_scholar(topic: str, limit: int = 50):
             params={
                 "query": topic,
                 "limit": min(100, limit),
-                "fields": "title,year,citationCount,authors,venue,externalIds",
+                "fields": "title,year,citationCount,authors.hIndex,authors,venue,externalIds",
             },
             timeout=30,
         )
@@ -117,12 +124,18 @@ def query_semantic_scholar(topic: str, limit: int = 50):
         return []
     out = []
     for p in r.json().get("data", []) or []:
+        h_index = (
+            max((a.get("hIndex") or 0) for a in (p.get("authors") or []))
+            if p.get("authors")
+            else None
+        )
         out.append({
             "title": (p.get("title") or "").strip(),
             "year": p.get("year"),
             "cited_by": p.get("citationCount"),
             "doi": (p.get("externalIds") or {}).get("DOI"),
             "authors": [a.get("name") for a in (p.get("authors") or [])[:5]],
+            "h_index": h_index,
             "venue": p.get("venue"),
             "source": "semantic_scholar",
         })
@@ -182,6 +195,8 @@ def render_work(w):
         f"- **{w.get('title') or 'untitled'}** ({w.get('year') or '?'}) — "
         f"{authors}. *{w.get('venue') or '—'}*. "
         f"Cited **{w.get('cited_by') or 0}×** [{w.get('source')}]"
+        + (f" · h-index {w.get('h_index')}" if w.get('h_index') else "")
+        + (f" · {w.get('institution')}" if w.get('institution') else "")
         + (f" doi:{w.get('doi')}" if w.get('doi') else "")
     )
 

@@ -243,6 +243,29 @@ Write the synthesis to `research/[slug]/round2/synthesis.md`.
 - `## New Questions`, `## Root Cause Questions`, `## Consequence Questions` — the
   question buckets Round 2.5 chases (gap / root-cause / consequence).
 
+### Source authority — how to weigh evidence
+
+Before weighing sources for any claim, CLASSIFY the claim: **factual/quantitative**
+(a number, date, measurement, event) vs **interpretive/opinion** (a judgment,
+forecast, framing). Weigh sources differently per class.
+
+- **Quantitative/factual claims** — prefer higher-provenance sources and claim
+  quality: error bars, sample size, replication, primary over secondary. Read the
+  tags (`tier`, `institution`, `stance`, `replication`). FLAG explicitly any number
+  that rests only on a tier-0 source or an `unverified` institution: name the
+  weakness, do not launder the figure into the prose.
+- **Interpretive/opinion claims** — do NOT rank by source `tier`. Attribute the view
+  to its named source. Where sources disagree, present the SPREAD of views rather
+  than resolving by authority.
+- **Prestige as a prior, not a trump** — treat prestige signals in the tags (author
+  `h-index`, `established` institution) as a credibility PRIOR for NEW or low-cited
+  work only: it lifts a fresh result off the floor but NEVER overrides contradicting
+  evidence or a failed/absent `replication`.
+- **Read the transparent tags** — distinguish `named` (curated-recognized)
+  institutions from `unverified` ones. An `established` institution is not
+  necessarily neutral: a `stance: advocacy` tag means the view carries a known
+  agenda, so attribute it, do not treat it as disinterested `stance: research`.
+
 ## Round 2.5 — Deepening
 
 Ingest the Round-2 headers, split questions into three buckets (root-cause /
@@ -269,6 +292,29 @@ dispatch section-planner subagents + a reconciler, then **one integration subage
 section** in parallel (each ≤ ~40k words of input). Preserve every citation, every
 `[as of: <date>]` and `[confidence: …]` tag, and every unique finding; present
 differing figures as `[disputed: …]`, never a silent average.
+
+### Source authority — how to weigh evidence
+
+Carry the Round-2 discipline through integration. Before weighing sources for any
+claim, CLASSIFY it: **factual/quantitative** (a number, date, measurement, event) vs
+**interpretive/opinion** (a judgment, forecast, framing). Weigh differently per class.
+
+- **Quantitative/factual claims** — prefer higher-provenance sources and claim
+  quality: error bars, sample size, replication, primary over secondary. Read the
+  tags (`tier`, `institution`, `stance`, `replication`). FLAG explicitly any number
+  that rests only on a tier-0 source or an `unverified` institution: mark it, do not
+  present it as settled.
+- **Interpretive/opinion claims** — do NOT rank by source `tier`. Attribute the view
+  to its named source. Where sources disagree, present the SPREAD of views in the
+  section rather than resolving by authority.
+- **Prestige as a prior, not a trump** — treat prestige signals in the tags (author
+  `h-index`, `established` institution) as a credibility PRIOR for NEW or low-cited
+  work only: it lifts a fresh result off the floor but NEVER overrides contradicting
+  evidence or a failed/absent `replication`.
+- **Read the transparent tags** — distinguish `named` (curated-recognized)
+  institutions from `unverified` ones. An `established` institution is not
+  necessarily neutral: a `stance: advocacy` tag means the view carries a known
+  agenda, so attribute it, do not treat it as disinterested `stance: research`.
 
 Build the master bibliography deterministically (beats LLM dedup):
 
