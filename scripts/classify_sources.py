@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import functools
 import json
 import re
 from collections import Counter
@@ -116,6 +117,118 @@ def classify(entry: str) -> str:
     return "unknown"
 
 
+# The .gov hint reused by descriptors_of (mirrors the pattern in INSTITUTIONAL_HINTS).
+GOV_HINT_RE = re.compile(r"\.gov(?:\.[a-z]{2,3})?\b", re.IGNORECASE)
+
+_INSTITUTIONS_PATH = Path(__file__).resolve().parent.parent / "data" / "institutions.json"
+
+
+@functools.lru_cache(maxsize=1)
+def load_institutions():
+    """Load the curated institution list, CWD-independently and defensively.
+
+    Returns a list of dicts, each a copy of the source entry with an added
+    ``_compiled`` key holding the entry's ``match`` regexes pre-compiled
+    (case-insensitive). A missing/unreadable file yields ``[]`` (never raises);
+    an entry with a bad regex is skipped rather than crashing the whole load.
+    Cached so the JSON is read and compiled only once per process."""
+    try:
+        raw = _INSTITUTIONS_PATH.read_text(encoding="utf-8", errors="replace")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+
+    out = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        compiled = []
+        ok = True
+        for pat in entry.get("match", []) or []:
+            try:
+                compiled.append(re.compile(pat, re.IGNORECASE))
+            except (re.error, TypeError):
+                ok = False
+                break
+        if not ok:
+            continue
+        record = dict(entry)
+        record["_compiled"] = compiled
+        out.append(record)
+    return out
+
+
+def descriptors_of(entry: str, tier: str) -> dict:
+    """Descriptor sub-classification for an entry already tiered by ``classify``.
+
+    Only meaningful for the institutional tier; every other tier returns ``{}``
+    so callers can treat non-institutional entries uniformly. For institutional
+    entries:
+      - a match against the curated list -> the org's standing/stance, sub=named
+      - else a .gov domain -> a named, established research source
+      - else (matched only via generic hints like "white paper") -> unverified
+    """
+    if tier != "institutional":
+        return {}
+
+    for org in load_institutions():
+        for rx in org.get("_compiled", []):
+            if rx.search(entry):
+                return {
+                    "sub": "named",
+                    "standing": org.get("standing", "unknown"),
+                    "stance": org.get("stance", "unverified"),
+                }
+
+    if GOV_HINT_RE.search(entry):
+        return {"sub": "named", "standing": "established", "stance": "research"}
+
+    return {"sub": "unverified", "standing": "unknown", "stance": "unverified"}
+
+
+def authority_tag(entry: dict) -> str:
+    """Transparent source-authority tag: a ``·``-joined bracketed string built
+    from whatever provenance fields are present on ``entry``, absent ones omitted.
+
+    Field order: tier · year · N cited · author h-index N · institution · stance
+    · replication. ``tier`` is always present, so the minimum output is
+    ``[tier]``. Uses middot (U+00B7) as the separator; never an em-dash."""
+    parts = [str(entry.get("tier", "unknown"))]
+
+    year = entry.get("year")
+    if not year:
+        pub = entry.get("published_date")
+        if pub and len(str(pub)) >= 4 and str(pub)[:4].isdigit():
+            year = str(pub)[:4]
+    if year:
+        parts.append(str(year))
+
+    cited = entry.get("cited_by")
+    if isinstance(cited, int) and not isinstance(cited, bool):
+        parts.append(f"{cited} cited")
+
+    h_index = entry.get("h_index")
+    if h_index:
+        parts.append(f"author h-index {h_index}")
+
+    institution = entry.get("institution")
+    if institution:
+        parts.append(str(institution))
+
+    if entry.get("stance") == "advocacy":
+        parts.append("advocacy")
+    if entry.get("sub") == "unverified":
+        parts.append("unverified")
+
+    replication = entry.get("replication")
+    if replication:
+        parts.append(str(replication))
+
+    return "[" + " · ".join(parts) + "]"
+
+
 BIB_BULLET_RE = re.compile(r"^\s*(?:[-*]\s+|\d+\.\s+)")
 YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 URL_RE = re.compile(r"https?://[^\s\)\]]+", re.IGNORECASE)
@@ -177,9 +290,21 @@ def main():
         + counts.get("book", 0) * 2
         + counts.get("news", 0) * 1
     ) / (total * 3)
+    # Advisory only: how many institutional entries are unverified (generic-hint
+    # matches with no curated org and no .gov). Does NOT feed quality_score.
+    institutional_unverified = sum(
+        1
+        for e, t in classified
+        if t == "institutional" and descriptors_of(e, t).get("sub") == "unverified"
+    )
+
     lines += ["", f"## Quality score: **{quality_score:.2f}** / 1.0",
               "",
               "(weighted: peer_reviewed=3, institutional=3, preprint=2, book=2, news=1, blog/wiki/unknown=0)",
+              "",
+              f"_Advisory: institutional_unverified = **{institutional_unverified}** "
+              "(institutional entries matched only by generic hints, not the curated list; "
+              "these still count at institutional weight 3 in the score above, flagged here as low-confidence)_",
               ""]
 
     for tier in ["unknown", "wiki", "blog", "news", "book", "preprint", "institutional", "peer_reviewed"]:

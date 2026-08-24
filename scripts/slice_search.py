@@ -54,7 +54,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import config
-from scripts.classify_sources import tier_of
+from scripts.classify_sources import tier_of, authority_tag, descriptors_of
 from scripts.cost import RETRIEVAL_FEES, RETRY_MULTIPLIER
 from scripts.ledger import RetrievalLedger, LedgerCapExceeded
 from scripts import lit_search
@@ -147,7 +147,8 @@ def _result_to_item(raw, name):
     if not url:
         return None
     venue = raw.get("author") or raw.get("source")
-    return {
+    tier = tier_of(url, venue)
+    item = {
         "title": (raw.get("title") or "").strip(),
         "url": url,
         "published_date": raw.get("publishedDate") or None,
@@ -157,9 +158,20 @@ def _result_to_item(raw, name):
         # index by run_slice — spilled to sources/<file>.txt and replaced with a
         # text_path pointer so the index stays small but synthesis can read it.
         "text": (raw.get("text") or "").strip(),
-        "tier": tier_of(url, venue),
+        "tier": tier,
         "slice": name,
     }
+    # Degraded authority tag: Exa rows carry no citation count or author h-index.
+    # For a URL that matches the curated institution list under an institutional
+    # tier, fold in the named org's stance/sub so the tag can still surface
+    # advocacy / unverified standing; otherwise the tag is just [tier · year].
+    desc = descriptors_of(url, tier)
+    if desc.get("stance"):
+        item["stance"] = desc["stance"]
+    if desc.get("sub"):
+        item["sub"] = desc["sub"]
+    item["authority_tag"] = authority_tag(item)
+    return item
 
 
 def _source_filename(item):
@@ -229,8 +241,9 @@ def _write_brief(path, name, items):
         chars = it.get("text_chars") or 0
         ft = (f" · full text {chars:,} chars → {it['text_path']}"
               if chars and it.get("text_path") else "")
+        tag = it.get('authority_tag') or f"[{it['tier']}]"
         lines.append(f"- {it['title'] or 'untitled'} — {it['url']} "
-                     f"({_year_or_nd(it['published_date'])}) [{it['tier']}]{ft}")
+                     f"({_year_or_nd(it['published_date'])}) {tag}{ft}")
     lines += ["", "## Sources", ""]
     for it in items:
         lines.append(f"- {it['title'] or 'untitled'} — {it['url']} "
@@ -316,15 +329,37 @@ def _anchor_item(work):
         return None
     venue = work.get("venue")
     year = work.get("year")
-    return {
+    tier = tier_of(url, venue)
+    item = {
         "title": (work.get("title") or "").strip(),
         "url": url,
         "published_date": str(year) if year else None,
         "author": (work.get("authors") or [None])[0],
         "highlights": [],
-        "tier": tier_of(url, venue),
+        "tier": tier,
         "slice": "anchor",
     }
+    # Rich provenance fields carried on the lit_search work dict.
+    if year:
+        item["year"] = year
+    if work.get("cited_by") is not None:
+        item["cited_by"] = work.get("cited_by")
+    if work.get("h_index"):
+        item["h_index"] = work.get("h_index")
+    if work.get("institution"):
+        item["institution"] = work.get("institution")
+    # Descriptor sub-classification (sub / standing / stance) — merged so the tag
+    # can surface advocacy / unverified standing for institutional anchors.
+    desc = descriptors_of(f"{venue or ''} {url}", tier)
+    for k in ("sub", "standing", "stance"):
+        if desc.get(k):
+            item[k] = desc[k]
+    # Preprints are not yet peer-reviewed → flag as unreplicated; other tiers
+    # leave replication absent (no claim either way).
+    if tier == "preprint":
+        item["replication"] = "unreplicated"
+    item["authority_tag"] = authority_tag(item)
+    return item
 
 
 def run_anchor(topic, round1_dir):
