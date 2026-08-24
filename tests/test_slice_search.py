@@ -111,7 +111,10 @@ def test_category_slice_uses_category_not_domains(monkeypatch, tmp_path, two_sli
     assert "includeDomains" not in pub
     assert pub["query"] == "batteries"
     assert pub["numResults"] == 15
-    assert pub["contents"] == {"highlights": True}
+    assert pub["contents"] == {
+        "highlights": True,
+        "text": {"maxCharacters": slice_search.TEXT_MAX_CHARS},
+    }
 
 
 def test_domain_slice_uses_includeDomains_not_category(monkeypatch, tmp_path, two_slice_cfg):
@@ -315,3 +318,47 @@ def test_missing_exa_key_exits_20(monkeypatch, tmp_path, two_slice_cfg):
     monkeypatch.setattr(config, "load_run_config", lambda *a, **k: two_slice_cfg)
     rc = slice_search.main(["--run-dir", str(tmp_path), "--topic", "x"])
     assert rc == slice_search.EXA_PREFLIGHT_EXIT
+
+
+# --- full-text spill (Fix #1: Exa text → sources/<file>.txt) ----------------
+
+def test_request_body_asks_for_text():
+    body = slice_search.build_request_body(
+        "publication",
+        config.SliceSpec(query="{topic}", category="research paper",
+                         include_domains=None, enabled=True),
+        "batteries")
+    assert body["contents"]["highlights"] is True
+    assert body["contents"]["text"] == {"maxCharacters": slice_search.TEXT_MAX_CHARS}
+
+
+def test_result_text_spills_to_source_file(monkeypatch, tmp_path, two_slice_cfg):
+    long_text = "Full extracted body. " * 200
+    r = _result("https://a.com/1", highlights=["snip"])
+    r["text"] = long_text
+    session = FakeSession([_exa_body([r]),
+                           _exa_body([_result("https://oecd.org/2")])])
+    _patch_common(monkeypatch, two_slice_cfg, session)
+    rc = slice_search.main(["--run-dir", str(tmp_path), "--topic", "x"])
+    assert rc == 0
+
+    rows = [json.loads(l) for l in
+            (tmp_path / "round1" / "slice_publication.jsonl").read_text().splitlines() if l.strip()]
+    row = rows[0]
+    # Text is NOT inlined in the index; it is pointed at a spill file.
+    assert "text" not in row
+    assert row["text_chars"] == len(long_text.strip())
+    spill = tmp_path / "round1" / row["text_path"]
+    assert spill.read_text(encoding="utf-8") == long_text.strip()
+
+
+def test_result_without_text_gets_zero_chars(monkeypatch, tmp_path, two_slice_cfg):
+    session = FakeSession([_exa_body([_result("https://a.com/1")]),
+                           _exa_body([_result("https://oecd.org/2")])])
+    _patch_common(monkeypatch, two_slice_cfg, session)
+    slice_search.main(["--run-dir", str(tmp_path), "--topic", "x"])
+    rows = [json.loads(l) for l in
+            (tmp_path / "round1" / "slice_publication.jsonl").read_text().splitlines() if l.strip()]
+    assert rows[0]["text_chars"] == 0
+    assert "text_path" not in rows[0]
+    assert "text" not in rows[0]

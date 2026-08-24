@@ -52,7 +52,8 @@ pip install -r requirements.txt
 ```
 Round 0    SCOPE            scope.py → scope.json (domain + source priorities)
               ↓
-Round 1    RETRIEVE         slice_search.py → Exa slices + academic anchor
+Round 1    RETRIEVE         slice_search.py → Exa slices (full text) + academic anchor
+              ↓             fetch_fulltext.py → read PDFs/pages Exa left thin (incl. OA papers)
               ↓             evidence_gate.py → MUST pass (exit 0) before any synthesis
 Round 2    SYNTHESIZE       compare the corpus; emit the six EXACT headers (4 feed buckets)
               ↓
@@ -112,6 +113,12 @@ tiers + dedupes results, and writes `round1/slice_<name>.jsonl`, `round1/brief_<
 and `round1/evidence_manifest.json`. It also writes a free OpenAlex/Semantic Scholar
 academic anchor (`slice_anchor.jsonl`, $0 — never ledgered).
 
+Each Exa slice now also requests **full page/PDF text** (`contents.text`, capped at
+`DR_TEXT_MAX_CHARS`, default 12k). That text is spilled to `round1/sources/<file>.txt`
+and each jsonl row carries `text_path` + `text_chars` — so synthesis reads the whole
+document, not a highlight snippet. Set `DR_TEXT_MAX_CHARS=0` to fall back to
+highlights-only.
+
 ```bash
 python3 scripts/slice_search.py \
   --run-dir research/[slug] \
@@ -149,10 +156,32 @@ and exits `22`.
 enable more slices in TOML, re-run `slice_search.py --resume`, and re-gate. Only when
 the gate returns `0` may Round 2 begin.
 
+**Step 1.4 — full-text fill (recommended).** Some sources come back thin: the
+academic anchor is metadata-only, and Exa does not always render every PDF-backed
+white paper or report. This pass reads those documents directly — resolving an
+**open-access PDF via OpenAlex** for DOI/academic rows, fetching plain PDFs and
+pages as-is — then extracts the text (pypdf for PDFs, tag-strip for HTML) into the
+same `round1/sources/` store and updates each thin row's `text_path`/`text_chars`.
+
+```bash
+python3 scripts/fetch_fulltext.py \
+  --run-dir research/[slug] \
+  --min-chars 400        # rows with fewer stored chars get a direct-fetch attempt
+```
+
+Every fetch goes through the SSRF-hardened, IP-pinned path reused from
+`verify_citations` (redirects re-vetted per hop); per-source **fail-open**; `$0` —
+never ledgered; **no WebFetch** (raw bytes read directly). Writes
+`round1/fulltext_manifest.json` (attempted / fetched / by-method / failures).
+Requires `pypdf` (in `requirements.txt`); without it, PDF rows skip gracefully.
+
 ## Round 2 — Synthesis
 
 Dispatch **one synthesis subagent** to read the entire Round-1 corpus (all
-`round1/slice_*.jsonl` + `brief_*.md` + the anchor) and produce a comparison. It runs
+`round1/slice_*.jsonl` + `brief_*.md` + the anchor) and produce a comparison. For any
+row with a `text_path`, **read that `round1/sources/<file>.txt` full-text file** and
+reason over the document itself — the highlights are only an index into it, not the
+evidence. It runs
 on the Claude Code session's own subagent (subscription, $0) when available, else on a
 metered Anthropic call bounded by `--max-cost-usd`.
 
@@ -391,6 +420,7 @@ RUN=research/grid-battery
 python3 scripts/scope.py --topic "$TOPIC" --scope "LCOE trends, chemistry mix, capacity buildout, policy drivers" --output "$RUN/scope.json"
 python3 scripts/slice_search.py --run-dir "$RUN" --topic "$TOPIC" --max-retrieval-usd 1
 python3 scripts/evidence_gate.py --run-dir "$RUN"        # must exit 0 before synthesis
+python3 scripts/fetch_fulltext.py --run-dir "$RUN"       # read PDFs/OA papers Exa left thin
 # → Round 2 synthesis subagent (emit the six EXACT headers) → round2/synthesis.md
 python3 scripts/deepen_questions.py --run-dir "$RUN" --round2-file "$RUN/round2/synthesis.md"
 # → Round 3 integration → sections/ → Round 4:

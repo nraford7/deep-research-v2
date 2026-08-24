@@ -33,6 +33,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -61,6 +62,12 @@ from scripts import lit_search
 EXA_SEARCH_URL = "https://api.exa.ai/search"
 EXA_PREFLIGHT_EXIT = 20
 NUM_RESULTS = 15
+
+# Full-text retrieval: ask Exa to extract each result's page/PDF text (server-side,
+# so PDF-backed white papers, reports, and articles are read too — not just HTML).
+# Capped so a single source can't blow the synthesis context. Override with
+# DR_TEXT_MAX_CHARS. Set to 0 to fall back to highlights-only.
+TEXT_MAX_CHARS = int(os.environ.get("DR_TEXT_MAX_CHARS", "12000"))
 
 # The per-call worst-case pre-charge (fee × retry multiplier). Single source of
 # truth is scripts/cost.py — never hardcode $0.04 here.
@@ -94,10 +101,13 @@ def build_request_body(name, spec, topic, query_override=None, fresh_since=None)
     ``--fresh-since`` date is supplied."""
     query = (query_override if query_override is not None
              else spec.query.format(topic=topic))
+    contents = {"highlights": True}
+    if TEXT_MAX_CHARS > 0:
+        contents["text"] = {"maxCharacters": TEXT_MAX_CHARS}
     body = {
         "query": query,
         "numResults": NUM_RESULTS,
-        "contents": {"highlights": True},
+        "contents": contents,
     }
     if spec.include_domains:
         body["includeDomains"] = list(spec.include_domains)
@@ -143,9 +153,38 @@ def _result_to_item(raw, name):
         "published_date": raw.get("publishedDate") or None,
         "author": raw.get("author") or None,
         "highlights": list(raw.get("highlights") or []),
+        # Full extracted page/PDF text (Exa server-side). Kept out of the jsonl
+        # index by run_slice — spilled to sources/<file>.txt and replaced with a
+        # text_path pointer so the index stays small but synthesis can read it.
+        "text": (raw.get("text") or "").strip(),
         "tier": tier_of(url, venue),
         "slice": name,
     }
+
+
+def _source_filename(item):
+    """Deterministic, filesystem-safe name for a source's full-text spill file."""
+    key = f"{item.get('slice', 'slice')}:{item.get('url', '')}"
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    return f"{item.get('slice', 'slice')}_{digest}.txt"
+
+
+def _spill_fulltext(items, round1_dir):
+    """Move each item's inline ``text`` into round1/sources/<file>.txt and replace
+    it with ``text_path`` (relative to round1_dir) + ``text_chars``. Items with no
+    text get text_chars=0 and no path — fetch_fulltext.py fills those later.
+    Mutates items in place so the jsonl written afterwards stays lean."""
+    sources_dir = round1_dir / "sources"
+    for item in items:
+        text = (item.pop("text", "") or "").strip()
+        if text:
+            fname = _source_filename(item)
+            sources_dir.mkdir(parents=True, exist_ok=True)
+            (sources_dir / fname).write_text(text, encoding="utf-8")
+            item["text_path"] = f"sources/{fname}"
+            item["text_chars"] = len(text)
+        else:
+            item["text_chars"] = 0
 
 
 def _jsonl_parses(path):
@@ -180,11 +219,18 @@ def _year_or_nd(published_date):
 
 def _write_brief(path, name, items):
     lines = [f"# Round-1 brief — slice `{name}`", ""]
+    if items:
+        lines += ["> Sources with a `full text` marker have their extracted "
+                  "page/PDF text saved under `round1/<text_path>` — read those "
+                  "files for evidence, not just the highlight snippets.", ""]
     if not items:
         lines.append("_(no results)_")
     for it in items:
+        chars = it.get("text_chars") or 0
+        ft = (f" · full text {chars:,} chars → {it['text_path']}"
+              if chars and it.get("text_path") else "")
         lines.append(f"- {it['title'] or 'untitled'} — {it['url']} "
-                     f"({_year_or_nd(it['published_date'])}) [{it['tier']}]")
+                     f"({_year_or_nd(it['published_date'])}) [{it['tier']}]{ft}")
     lines += ["", "## Sources", ""]
     for it in items:
         lines.append(f"- {it['title'] or 'untitled'} — {it['url']} "
@@ -249,6 +295,7 @@ def run_slice(name, spec, topic, session, api_key, ledger, round1_dir,
         seen.add(key)
         items.append(item)
 
+    _spill_fulltext(items, round1_dir)
     _write_jsonl(jsonl_path, items)
     _write_brief(brief_path, name, items)
     return len(seen), dropped
@@ -310,6 +357,7 @@ def run_anchor(topic, round1_dir):
             continue
         seen.add(key)
         items.append(item)
+    _spill_fulltext(items, round1_dir)
     _write_jsonl(jsonl_path, items)
     _write_brief(brief_path, "anchor", items)
     return seen, len(seen), dropped
