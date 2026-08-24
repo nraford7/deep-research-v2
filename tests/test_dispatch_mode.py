@@ -2,8 +2,8 @@
 
 `dispatch.main()` is a thin orchestrator guide: it validates the run mode,
 preflights EXA_API_KEY, and prints the ordered Round-1 command sequence
-(scope → slice_search → evidence_gate). There is no legacy branch and no
-fleet dispatch.
+(scope → slice_search → evidence_gate → coverage_audit), plus a Round-4
+reminder for lint_background. There is no legacy branch and no fleet dispatch.
 
 Isolation: we monkeypatch `config.load_env_files` (and, defensively,
 `config.default_toml_paths`) so NO live ~/.env or ~/.config TOML is read.
@@ -47,12 +47,16 @@ def test_slices_mode_with_key_prints_sequence_exit_0(monkeypatch, capsys, tmp_pa
     # main() returns normally (no SystemExit) on the happy path.
     assert code is None
     out = capsys.readouterr().out
-    # The ordered scope → slice_search → evidence_gate command sequence prints.
+    # The ordered scope → slice_search → evidence_gate → coverage_audit sequence prints.
     assert "scripts/scope.py" in out
     assert "scripts/slice_search.py" in out
     assert "scripts/evidence_gate.py" in out
-    # Ordering: scope before slice_search before evidence_gate.
-    assert out.index("scope.py") < out.index("slice_search.py") < out.index("evidence_gate.py")
+    assert "scripts/coverage_audit.py" in out
+    # Ordering: scope before slice_search before evidence_gate before coverage_audit.
+    assert (out.index("scope.py") < out.index("slice_search.py")
+            < out.index("evidence_gate.py") < out.index("coverage_audit.py"))
+    # lint_background is named as the Round-4 checklist step (not in the Round-1 order).
+    assert "scripts/lint_background.py" in out
     # The run dir is threaded into each command.
     assert str(run_dir) in out
 
