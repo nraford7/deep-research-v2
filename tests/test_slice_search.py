@@ -352,6 +352,35 @@ def test_result_text_spills_to_source_file(monkeypatch, tmp_path, two_slice_cfg)
     assert spill.read_text(encoding="utf-8") == long_text.strip()
 
 
+# --- _anchor_item citation-graph persistence --------------------------------
+
+def test_anchor_item_persists_bare_openalex_id_and_refs():
+    # A work carrying an OpenAlex id + referenced_works (full-URL forms) must
+    # persist openalex_id and referenced_works in BARE W-form on the anchor row,
+    # so downstream citation dedupe keys match.
+    work = {
+        "title": "Spine paper", "id": "https://openalex.org/W42",
+        "doi": "10.1/spine", "year": 2019, "cited_by": 88, "authors": ["Q"],
+        "venue": "Nature",
+        "referenced_works": ["https://openalex.org/W1", "https://openalex.org/W2"],
+    }
+    row = slice_search._anchor_item(work)
+    assert row is not None
+    assert row["openalex_id"] == "W42"
+    assert row["referenced_works"] == ["W1", "W2"]
+    assert row["url"] == "https://doi.org/10.1/spine"
+
+
+def test_anchor_item_openalex_id_only_no_doi():
+    # No DOI → url falls back to the OpenAlex id; openalex_id + refs still persist.
+    work = {"title": "T", "id": "https://openalex.org/W7",
+            "referenced_works": ["https://openalex.org/W3"]}
+    row = slice_search._anchor_item(work)
+    assert row["openalex_id"] == "W7"
+    assert row["referenced_works"] == ["W3"]
+    assert row["url"] == "https://openalex.org/W7"
+
+
 def test_result_without_text_gets_zero_chars(monkeypatch, tmp_path, two_slice_cfg):
     session = FakeSession([_exa_body([_result("https://a.com/1")]),
                            _exa_body([_result("https://oecd.org/2")])])

@@ -51,10 +51,13 @@ def test_slices_mode_with_key_prints_sequence_exit_0(monkeypatch, capsys, tmp_pa
     assert "scripts/scope.py" in out
     assert "scripts/slice_search.py" in out
     assert "scripts/evidence_gate.py" in out
+    assert "scripts/citation_chase.py" in out
     assert "scripts/coverage_audit.py" in out
-    # Ordering: scope before slice_search before evidence_gate before coverage_audit.
+    # Ordering: scope before slice_search before evidence_gate before citation_chase
+    # before coverage_audit.
     assert (out.index("scope.py") < out.index("slice_search.py")
-            < out.index("evidence_gate.py") < out.index("coverage_audit.py"))
+            < out.index("evidence_gate.py") < out.index("citation_chase.py")
+            < out.index("coverage_audit.py"))
     # lint_background is named as the Round-4 checklist step (not in the Round-1 order).
     assert "scripts/lint_background.py" in out
     # The run dir is threaded into each command.

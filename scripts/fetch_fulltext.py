@@ -210,6 +210,35 @@ def _doi_from_url(url: str) -> str | None:
     return m.group(0).rstrip("/.") if m else None
 
 
+def _openalex_id_from_row(row: dict, url: str) -> str | None:
+    """Return a bare OpenAlex W-id for a DOI-less row, from row["openalex_id"]
+    or parsed out of an https://openalex.org/W... url. None if neither is present."""
+    raw = (row.get("openalex_id") or "").strip()
+    if not raw:
+        m = re.search(r"openalex\.org/(W\d+)", url or "", re.IGNORECASE)
+        if m:
+            raw = m.group(1)
+    if not raw:
+        return None
+    m = re.search(r"(W\d+)", raw, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _best_oa_pdf_from_work(work: dict) -> str | None:
+    """Read the best open-access PDF (or landing/oa) url from an OpenAlex work
+    record, in priority order. Returns a url or None."""
+    best = work.get("best_oa_location") or {}
+    for key in ("pdf_url", "landing_page_url"):
+        val = best.get(key)
+        if val:
+            return val
+    oa = work.get("open_access") or {}
+    if oa.get("oa_url"):
+        return oa.get("oa_url")
+    primary = work.get("primary_location") or {}
+    return primary.get("pdf_url")
+
+
 def _openalex_oa_pdf(doi: str, timeout: int) -> str | None:
     """Ask OpenAlex for an open-access PDF url for ``doi`` (free API, no key).
     The lookup itself goes through the same safe fetch. Returns a url or None."""
@@ -221,13 +250,22 @@ def _openalex_oa_pdf(doi: str, timeout: int) -> str | None:
         work = json.loads(data.decode("utf-8", errors="replace"))
     except Exception:  # noqa: BLE001
         return None
-    best = work.get("best_oa_location") or {}
-    for key in ("pdf_url", "landing_page_url"):
-        val = best.get(key)
-        if val:
-            return val
-    oa = work.get("open_access") or {}
-    return oa.get("oa_url")
+    return _best_oa_pdf_from_work(work)
+
+
+def _openalex_oa_pdf_by_id(work_id: str, timeout: int) -> str | None:
+    """Resolve an open-access PDF url from a bare OpenAlex W-id (DOI-less rows).
+    GETs works/<Wid> and reads best_oa_location.pdf_url (or oa_url / primary
+    pdf_url). Same free API, same safe fetch. Returns a url or None."""
+    api = f"{OPENALEX}/works/{work_id}?mailto={CONTACT}"
+    data, ctype_or_reason, _ = _safe_get(api, 2_000_000, timeout)
+    if data is None:
+        return None
+    try:
+        work = json.loads(data.decode("utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001
+        return None
+    return _best_oa_pdf_from_work(work)
 
 
 # --------------------------------------------------------------------------- #
@@ -235,8 +273,10 @@ def _openalex_oa_pdf(doi: str, timeout: int) -> str | None:
 # --------------------------------------------------------------------------- #
 
 def _fetch_row_text(url: str, is_academic: bool, max_bytes: int,
-                    max_chars: int, timeout: int) -> tuple[str, str]:
+                    max_chars: int, timeout: int,
+                    row: dict | None = None) -> tuple[str, str]:
     """Return (text, method) for one source url, or ('', reason)."""
+    row = row or {}
     target = url
     method_prefix = ""
     if is_academic:
@@ -246,6 +286,22 @@ def _fetch_row_text(url: str, is_academic: bool, max_bytes: int,
             if oa:
                 target = oa
                 method_prefix = "oa:"
+        else:
+            # DOI-less citation candidate: resolve its OA location from an
+            # OpenAlex W-id (row["openalex_id"] or an openalex.org/W... url).
+            # A raw GET of a bare openalex.org URL returns HTTP 403, so we must
+            # hydrate the work and fetch its actual OA pdf instead.
+            wid = _openalex_id_from_row(row, url)
+            oa = _openalex_oa_pdf_by_id(wid, timeout) if wid else None
+            if oa:
+                target = oa
+                method_prefix = "oa:"
+            else:
+                # G6: no resolvable OA url for this DOI-less row (no W-id, or the
+                # work has no OA pdf/landing/oa_url). SKIP the fetch rather than
+                # raw-GETting the openalex.org page (which 403s / returns empty).
+                # Leave the row with no text; only a real OA url is worth fetching.
+                return "", "no-oa-url"
         # Fetching a bare doi.org link usually lands on a paywalled HTML page;
         # only worth it when OpenAlex found nothing and there IS a DOI target.
 
@@ -278,9 +334,18 @@ def process_run(run_dir: Path, min_chars: int, max_bytes: int,
             if not url:
                 continue
             summary["attempted"] += 1
-            is_academic = row.get("slice") == "anchor" or "doi.org" in url
+            # Citation-chase rows resolve via OpenAlex id / DOI, so route
+            # them through the academic OA-PDF path rather than a raw GET
+            # (a bare openalex.org URL returns HTTP 403 on a raw fetch).
+            is_academic = (
+                row.get("slice") in ("anchor", "citation")
+                or row.get("academic") is True
+                or "doi.org" in url
+                or bool(row.get("openalex_id"))
+                or "openalex.org/W" in url
+            )
             text, method = _fetch_row_text(
-                url, is_academic, max_bytes, max_chars, timeout)
+                url, is_academic, max_bytes, max_chars, timeout, row=row)
             if text and len(text) >= min_chars:
                 sources_dir.mkdir(parents=True, exist_ok=True)
                 fname = _source_filename(row)
