@@ -88,6 +88,12 @@ python3 scripts/slice_search.py --run-dir "$RUN" --topic "$TOPIC" --max-retrieva
 # 4. Evidence gate — MUST exit 0 before any synthesis (exit 22 = thin corpus)
 python3 scripts/evidence_gate.py --run-dir "$RUN"
 
+# 4b. Coverage audit: name + fill expected-but-absent coverage, then re-gate.
+#     Exit 0 = coverage verified; a NONZERO exit (30 no provider, 31 LLM error,
+#     32 bad JSON, 21 cap, 22 still thin) means coverage is UNVERIFIED: do NOT
+#     proceed to synthesis, surface and resolve it.
+python3 scripts/coverage_audit.py --run-dir "$RUN" --topic "$TOPIC"
+
 # → Round 2 synthesis subagent → $RUN/round2/synthesis.md (six exact headers)
 
 # 5. Round 2.5 deepening — root-cause / consequence / gap
@@ -107,6 +113,9 @@ python3 scripts/classify_sources.py "$RUN/sections/bibliography.md" \
 python3 scripts/lit_search.py --topic "CBDC monetary policy" --limit 50 \
   --compare-bib "$RUN/sections/bibliography.md" \
   --output "$RUN/round4/missing-lit.md"
+# Background-block lint: numeric tripwire inside fenced editorial blocks; exit 0 = clean,
+# exit 1 = a fenced block names a quantity (fix/re-fence it) before the refute adversary.
+python3 scripts/lint_background.py "$RUN/sections/"
 
 # 8. Export + refresh the project-wide semantic index (bundled; over every topic's Bible)
 python3 scripts/export.py --sections "$RUN/sections/" \
@@ -168,6 +177,8 @@ Providers can also be local CLI tools (`api_type = "cli"`) — for example `clau
 | `scripts/scope.py` | Domain classification + source priority recommendations (rule-based + optional Claude) |
 | `scripts/slice_search.py` | Round-1 retrieval: Exa search slices + a free academic anchor; ledger-capped; writes jsonl briefs + manifest |
 | `scripts/evidence_gate.py` | Refuse synthesis over a thin corpus — exit 0 if thick enough and every row re-validates, else exit 22 |
+| `scripts/coverage_audit.py` | Post-gate coverage auditor: name expected-but-absent coverage, fill each gap with a scope-bounded Exa slice, re-gate. Fail-closed: exit 0 = coverage verified, nonzero (30/31/32/21/22) = unverified, do not synthesize |
+| `scripts/lint_background.py` | Round-4 numeric tripwire inside fenced editorial blocks: exit 0 clean, exit 1 if a fenced block names a quantity |
 | `scripts/deepen_questions.py` | Round 2.5 deepening: root-cause / consequence / gap questions answered with Exa deep-reasoning |
 | `scripts/cost.py` | Cost estimator + retrieval fee table |
 | `scripts/verify_citations.py` | Resolve every citation against OpenAlex + Crossref; flag unresolved / weak matches / orphans; `--check-urls` runs a three-state SSRF-hardened link probe |

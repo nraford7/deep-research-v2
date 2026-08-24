@@ -36,6 +36,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
@@ -426,7 +427,11 @@ def main(argv=None):
     ap.add_argument("--max-retrieval-usd", type=float, default=None)
     ap.add_argument("--fresh-since", default=None)
     ap.add_argument("--only-slice", default=None, help="Round-5 single-slice ad-hoc rerun")
-    ap.add_argument("--query", default=None, help="ad-hoc query for --only-slice")
+    ap.add_argument("--query", default=None, help="ad-hoc query for --only-slice / --add-slice")
+    ap.add_argument("--add-slice", default=None,
+                    help="ad-hoc gap slice: NAME for a coverage-audit query (needs --query). "
+                         "Unlike --only-slice this need NOT match a roster key; the slice is "
+                         "written to round1/slice_gap_<NAME>.jsonl and ledger-charged. Skips the anchor.")
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir)
@@ -436,8 +441,32 @@ def main(argv=None):
     run_cfg = config.load_run_config()
     cap = args.max_retrieval_usd if args.max_retrieval_usd is not None else run_cfg.max_retrieval_usd
 
+    # Ad-hoc coverage-audit gap slice: build a frozen SliceSpec from --query, name it
+    # gap_<NAME>, and run it through run_slice so it is ledger-charged and glob-visible
+    # to the evidence gate. No roster lookup: the auditor names gaps the roster lacks.
+    if args.add_slice:
+        if not args.query:
+            print("--add-slice requires --query", file=sys.stderr)
+            return 2
+        # SANITIZE the gap name before it touches any output path. The name is
+        # interpolated into slice_gap_<NAME>.jsonl and full-text spill paths, so a
+        # value with '../' or path separators could escape round1/. Keep only
+        # [A-Za-z0-9_-]; collapse every other char to '_'. Empty after that → refuse.
+        safe = re.sub(r"[^A-Za-z0-9_-]", "_", args.add_slice)
+        if not safe.strip("_"):
+            print(f"--add-slice NAME '{args.add_slice}' has no usable characters "
+                  f"(allowed: A-Z a-z 0-9 _ -)", file=sys.stderr)
+            return 2
+        name = f"gap_{safe}"
+        # category=None → unfiltered general web search. "general" is NOT a valid Exa
+        # category enum (Exa 400s / ignores it); a gap query wants the plain query body.
+        spec = config.SliceSpec(
+            query=args.query, category=None,
+            include_domains=None, enabled=True,
+        )
+        to_run = {name: spec}
     # Which slices to run.
-    if args.only_slice:
+    elif args.only_slice:
         spec = run_cfg.slices.get(args.only_slice)
         if spec is None:
             print(f"unknown slice '{args.only_slice}'", file=sys.stderr)
@@ -468,9 +497,12 @@ def main(argv=None):
             global_keys |= keys
             continue
         try:
+            # --only-slice and --add-slice both carry a literal --query as the
+            # override (the gap query is not a {topic} template).
+            override = args.query if (args.only_slice or args.add_slice) else None
             unique, dropped = run_slice(
                 name, spec, args.topic, session, api_key, ledger, round1_dir,
-                query_override=args.query if args.only_slice else None,
+                query_override=override,
                 fresh_since=args.fresh_since,
             )
         except LedgerCapExceeded as exc:
@@ -481,8 +513,9 @@ def main(argv=None):
         manifest_slices[name] = {"unique": unique, "dropped": dropped}
         global_keys |= _slice_keys(jsonl_path)
 
-    # Academic anchor ($0) — only on a full run, not a Round-5 single-slice rerun.
-    if not args.only_slice:
+    # Academic anchor ($0) — only on a full run, not a Round-5 single-slice rerun
+    # and not an ad-hoc coverage-audit gap slice.
+    if not args.only_slice and not args.add_slice:
         if args.resume and (round1_dir / "slice_anchor.jsonl").exists() and \
                 _jsonl_parses(round1_dir / "slice_anchor.jsonl"):
             akeys = _slice_keys(round1_dir / "slice_anchor.jsonl")
@@ -493,9 +526,15 @@ def main(argv=None):
             manifest_slices["anchor"] = {"unique": aunique, "dropped": adropped}
             global_keys |= akeys
 
-    manifest = {"slices": manifest_slices, "global_unique": len(global_keys)}
-    (round1_dir / "evidence_manifest.json").write_text(
-        json.dumps(manifest, indent=2), encoding="utf-8")
+    # Only a full run owns evidence_manifest.json. A single-slice rerun
+    # (--only-slice) or an ad-hoc gap slice (--add-slice) covers just one slice,
+    # so writing the manifest here would overwrite the full Round-1 manifest with
+    # a one-slice lie. The evidence gate globs slice_*.jsonl regardless, so the
+    # gap slice stays gate-visible without touching the manifest.
+    if not args.only_slice and not args.add_slice:
+        manifest = {"slices": manifest_slices, "global_unique": len(global_keys)}
+        (round1_dir / "evidence_manifest.json").write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8")
     print(f"Round-1 retrieval complete: {len(manifest_slices)} slices, "
           f"global_unique={len(global_keys)}, committed=${ledger.committed():.4f}")
     return 0

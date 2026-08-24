@@ -7,7 +7,8 @@ description: Use when the user needs comprehensive, fact-checked, evidence-based
 
 Retrieval-first deep research. Round 1 fetches a real evidence corpus with Exa
 search slices (plus a free OpenAlex/Semantic Scholar academic anchor), a hard
-**evidence gate** refuses to synthesize over a thin corpus, and every later round
+**evidence gate** refuses to synthesize over a thin corpus, a **coverage auditor** then
+names and fills the gaps a competent reader would expect, and every later round
 reasons over that fetched evidence — not the model's memory. Question-driven
 deepening chases root-cause / consequence / gap questions, a mechanical verifier
 resolves every citation, and a **different-provider adversary** tries to refute
@@ -57,6 +58,7 @@ Round 0    SCOPE            scope.py → scope.json (domain + source priorities)
 Round 1    RETRIEVE         slice_search.py → Exa slices (full text) + academic anchor
               ↓             fetch_fulltext.py → read PDFs/pages Exa left thin (incl. OA papers)
               ↓             evidence_gate.py → MUST pass (exit 0) before any synthesis
+              ↓             coverage_audit.py → name expected-but-absent coverage, fill the gaps, re-gate
 Round 2    SYNTHESIZE       compare the corpus; emit the six EXACT headers (4 feed buckets)
               ↓
 Round 2.5  DEEPEN           deepen_questions.py → root-cause / consequence / gap answers
@@ -213,6 +215,39 @@ never ledgered; **no WebFetch** (raw bytes read directly). Writes
 `round1/fulltext_manifest.json` (attempted / fetched / by-method / failures).
 Requires `pypdf` (in `requirements.txt`); without it, PDF rows skip gracefully.
 
+**Step 1.5 · coverage audit (run after the gate passes).** The gate asks "is the
+corpus thick enough?"; this asks a different question: "for THIS scope, what coverage a
+competent reader would expect is still absent?" An LLM enumerates expected-but-absent
+coverage bounded to the run's scope, pairs each gap with one scope-bounded Exa query,
+fires each as an ad-hoc gap slice (ledger-charged, visible to the gate), re-runs the
+gate, then asks whether material gaps remain. The loop stops when no gaps remain, the
+round ceiling is hit, or the retrieval ledger cap trips (graceful exit 21).
+
+```bash
+python3 scripts/coverage_audit.py \
+  --run-dir research/[slug] \
+  --topic "Your topic" \
+  --max-audit-rounds 2         # optional; ceiling on fill-and-re-audit loops
+```
+
+It writes only `round1/coverage_gaps.md` (each gap + its query) and the gap slices its
+fills produce: ZERO Bible prose. Naming and filling gaps is its whole job; synthesis is
+Round 2's.
+
+**Fail-CLOSED exit codes (read them before proceeding).** Exit `0` means the audit RAN
+and coverage is adequate: only then is coverage verified. A NONZERO exit means the audit
+could not complete OR the corpus is still inadequate, and the orchestrator must NOT
+proceed to synthesis as if coverage was verified:
+- `30`: no LLM provider configured (audit could not run).
+- `31`: the audit model call raised (audit could not run).
+- `32`: the model reply's gap-list would not parse (audit could not run).
+- `21`: a gap fetch tripped the retrieval cap; `coverage_gaps.md` is written first, then
+  the audit stops. Raise `--audit-usd` (or free budget) and re-run.
+- `22`: the re-gate found the corpus STILL too thin / a row failed re-validation.
+Any of these means coverage is unverified: surface the code, resolve it (add a provider,
+retry the model, raise the cap, broaden and re-fetch), and only continue to Round 2 once
+the audit returns `0`.
+
 ## Round 2 — Synthesis
 
 Dispatch **one synthesis subagent** to read the entire Round-1 corpus (all
@@ -243,7 +278,41 @@ Write the synthesis to `research/[slug]/round2/synthesis.md`.
 - `## New Questions`, `## Root Cause Questions`, `## Consequence Questions` — the
   question buckets Round 2.5 chases (gap / root-cause / consequence).
 
-### Source authority — how to weigh evidence
+### Field map: how this field is organized
+
+Produce ONE near-top Bible section that maps the field: the **mainstream** position
+vs the **heterodox** ones, and what is **settled** vs **genuinely contested**. This
+orients the reader before the detail arrives: which camps exist, where the center of
+gravity sits, and which questions are actually open.
+
+**HARD RULE (this is the safety property).** EVERY structural claim in the field map
+must be EITHER:
+- **(a) cited to retrieved evidence:** the same `[Author, Year]` / source attribution
+  every other claim carries, OR
+- **(b) emitted inside a fenced editorial block** delimited by
+  `<!-- editorial:background -->` … `<!-- /editorial -->`.
+
+There is NO "no evidence exists, so assert it anyway" path. An uncited
+mainstream/heterodox or settled/contested partition asserted as bare prose is not
+acceptable output. If you cannot cite a partition and will not fence it as editorial
+background, do NOT emit it.
+
+**What actually enforces this.** `lint_background.py` is a numeric tripwire INSIDE the
+fences only: it flags a quantity (number, date, rate, share) that appears in a fenced
+block, and it inspects nothing else: it does NOT read unfenced prose and does NOT check
+citations. So the lint alone cannot catch an uncited partition dropped into bare prose.
+The enforcement MECHANISM that catches an uncited empirical claim before it reaches the
+Bible is the Round-4 refute-mode ADVERSARY: an LLM refute pass that reads the actual prose
+(fenced and unfenced) and refutes unsupported claims, backed by author discipline in
+following the cited-or-fenced rule above. This is a review-based check, not a mechanical
+proof: the lint is the numeric tripwire inside the fences, the adversary is the
+reader-facing pass over the prose.
+
+The map's interpretive/opinion claims follow the `### Source authority` rules below:
+attribute each camp to its named source · show the SPREAD of views · never rank camps
+by source `tier`.
+
+### Source authority: how to weigh evidence
 
 Before weighing sources for any claim, CLASSIFY the claim: **factual/quantitative**
 (a number, date, measurement, event) vs **interpretive/opinion** (a judgment,
@@ -287,13 +356,33 @@ Round 1: a per-question fail-open skips + continues (exit 0); a cap breach write
 
 ## Round 3 — Integration
 
-Read the Round-1 briefs + the Round-2.5 answers and integrate by topic section:
-dispatch section-planner subagents + a reconciler, then **one integration subagent per
-section** in parallel (each ≤ ~40k words of input). Preserve every citation, every
-`[as of: <date>]` and `[confidence: …]` tag, and every unique finding; present
-differing figures as `[disputed: …]`, never a silent average.
+Read four inputs and integrate by topic section: the Round-1 briefs, the Round-1
+retrieved **full texts** (`round1/sources/*.txt`, the actual documents, not just the
+highlight briefs), the Round-2 synthesis (`round2/synthesis.md`, which carries the field
+map), and the Round-2.5 answers. Dispatch section-planner subagents + a reconciler, then
+**one integration subagent per section** in parallel (each ≤ ~40k words of input).
+Preserve every citation, every `[as of: <date>]` and `[confidence: …]` tag, and every
+unique finding; present differing figures as `[disputed: …]`, never a silent average.
 
-### Source authority — how to weigh evidence
+Carry the **field map** through from `round2/synthesis.md`: keep the near-top
+mainstream-vs-heterodox / settled-vs-contested section, and hold its HARD RULE: every
+partition either cited to retrieved evidence or fenced in
+`<!-- editorial:background -->` … `<!-- /editorial -->`. An uncited partition asserted
+as bare prose is not acceptable output. The enforcement mechanism is the Round-4
+refute-mode adversary reading the prose (an LLM refute pass, review-based, not a
+mechanical proof; the lint only scans for numbers inside fences), backed by author
+discipline in following the rule.
+
+**Section subagents: background is fenced-only.** A section subagent MAY add
+background / definitional / mechanistic / historical context to orient the reader, but
+ONLY inside a fenced `<!-- editorial:background -->` … `<!-- /editorial -->` block
+(emit it via `render_background`, `scripts/background.py`). Such a block must contain
+NO empirical or quantitative claim: no number, date, measurement, rate, share, or
+named-study finding. Every empirical/quantitative claim must instead be retrieved and
+carried as normal cited prose. Framing prose that belongs to the corpus but sits
+outside a fence is uncited output, not background.
+
+### Source authority: how to weigh evidence
 
 Carry the Round-2 discipline through integration. Before weighing sources for any
 claim, CLASSIFY it: **factual/quantitative** (a number, date, measurement, event) vs
@@ -351,6 +440,31 @@ three sub-lists — NOT a binary "dead URLs" list:
 Optional companions: `classify_sources.py` (tier / quality score) and
 `lit_search.py --compare-bib` (canonical works missing from the bibliography).
 
+**Background-block lint (orchestrator-run checklist step).** Before the adversary,
+lint every fenced editorial block for invented quantities:
+
+```bash
+python3 scripts/lint_background.py research/[slug]/sections/
+```
+
+Exit `0` = clean; exit `1` = at least one block names a quantity, and the offending
+blocks are printed. The orchestrator MUST resolve each flagged quantity one of three
+ways: **(a)** cite it, retrieve a source and rewrite the figure as normal cited prose
+carrying that `[Author, Year]`; **(b)** keep the block fenced but rephrase it to remove
+the quantity (drop the number, keep the qualitative framing); or **(c)** cut the claim.
+NEVER move the quantity out of the fence into unfenced prose without a citation: that
+creates the exact uncited-empirical-claim state the cited-or-fenced rule forbids. This
+is a hard checklist gate, not an advisory.
+
+**Fenced background stays fenced (nothing mechanical promotes it).** Background /
+editorial blocks stay FENCED permanently: they are NEVER auto-cited and NEVER
+auto-promoted. Nothing mechanical promotes a memory claim into cited prose. If the author
+or the Round-4 adversary judges a fenced claim important enough to belong in the Bible as
+a normal cited statement, the ONLY paths are BY HAND: either find a real retrieved
+citation and rewrite the claim as normal cited prose carrying that `[Author, Year]`, or
+cut it. A fenced claim with no retrieved citation stays inside its fence or is dropped:
+it is never lifted out unsupported.
+
 **Step 4.2 — refute-mode adversary (a DIFFERENT provider family).** Dispatch one
 adversary subagent whose job is to *refute* the draft — find unsupported claims, weak
 attributions, and figures the corpus does not support. It must run on a provider whose
@@ -360,6 +474,14 @@ independent. Selection walks the configured `adversary` chain (default
 family ≠ `anthropic`; if none qualify it warns and falls back to the synthesizer (see
 [below](#provider-family--adversary-selection)). Feed the adversary the section files
 plus `round4/citation-verification.md`; write its report to `round4/factcheck.md`.
+
+**Adversary mandate: police every editorial:background block.** The adversary MUST
+scrutinize EVERY `<!-- editorial:background -->` … `<!-- /editorial -->` block for
+wrong or contested claims, and specifically for comparative / superlative claims that
+the mechanical lint cannot catch (it only flags numbers). Examples the adversary owns:
+"doubled", "an order of magnitude", "more common than", "the largest", "unprecedented".
+This adversary pass is the backstop for exactly those non-numeric empirical claims: the
+lint cannot see them, so the adversary must.
 
 **Step 4.3 — fix pass.** Correct the flagged errors and reassemble the final document.
 
@@ -505,10 +627,12 @@ python3 scripts/scope.py --topic "$TOPIC" --scope "LCOE trends, chemistry mix, c
 python3 scripts/slice_search.py --run-dir "$RUN" --topic "$TOPIC" --max-retrieval-usd 1
 python3 scripts/evidence_gate.py --run-dir "$RUN"        # must exit 0 before synthesis
 python3 scripts/fetch_fulltext.py --run-dir "$RUN"       # read PDFs/OA papers Exa left thin
+python3 scripts/coverage_audit.py --run-dir "$RUN" --topic "$TOPIC"   # name + fill expected-but-absent coverage, re-gate
 # → Round 2 synthesis subagent (emit the six EXACT headers) → round2/synthesis.md
 python3 scripts/deepen_questions.py --run-dir "$RUN" --round2-file "$RUN/round2/synthesis.md"
 # → Round 3 integration → sections/ → Round 4:
 python3 scripts/verify_citations.py "$RUN/sections/" --output "$RUN/round4/citation-verification.md" --check-urls
+python3 scripts/lint_background.py "$RUN/sections/"      # numeric tripwire inside fenced editorial blocks
 # → refute adversary (non-anthropic family) → fix pass → export.
 ```
 
@@ -525,14 +649,18 @@ When `/deep-research [topic]` is invoked:
    `slice_search.py`.
 3. **Evidence gate** — `evidence_gate.py`; **exit 0 required** before any synthesis
    (exit 22 → fix corpus + `--resume` + re-gate; exit 21 → raise cap, surface, resume).
-4. **Round 2 synthesis** — one subagent; emit the six EXACT headers to `round2/synthesis.md`.
-5. **Round 2.5 deepening** — `deepen_questions.py --round2-file …`.
-6. **Round 3 integration** — planners + parallel section subagents + `dedup_bib.py`; assemble + audit.
-7. **Round 4** — `verify_citations.py --check-urls` (+ `classify_sources.py`,
-   `lit_search.py --compare-bib`) → refute adversary (non-anthropic family) → fix pass.
-8. **Round 5 (optional)** — `slice_search --only-slice` / `deepen --single-question`; re-integrate.
-9. **Export** — `export.py`, then `search.py index`.
-10. **Report** — file location, stats, citation-resolution rate, and the index summary line.
+4. **Coverage audit:** `coverage_audit.py --run-dir … --topic …`; name expected-but-absent
+   coverage, fill the gaps, re-gate (graceful exit 21 on cap breach).
+5. **Round 2 synthesis** — one subagent; emit the six EXACT headers to `round2/synthesis.md`.
+6. **Round 2.5 deepening** — `deepen_questions.py --round2-file …`.
+7. **Round 3 integration** — read round1 briefs + `sources/*.txt` + `round2/synthesis.md`
+   + round2.5 answers; planners + parallel section subagents + `dedup_bib.py`; assemble + audit.
+8. **Round 4** — `verify_citations.py --check-urls` (+ `classify_sources.py`,
+   `lit_search.py --compare-bib`) → `lint_background.py research/[slug]/sections/`
+   (fix/re-fence flagged blocks) → refute adversary (non-anthropic family) → fix pass.
+9. **Round 5 (optional)** — `slice_search --only-slice` / `deepen --single-question`; re-integrate.
+10. **Export** — `export.py`, then `search.py index`.
+11. **Report** — file location, stats, citation-resolution rate, and the index summary line.
 
 ## Common Failure Modes
 
