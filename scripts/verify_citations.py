@@ -42,6 +42,25 @@ except ImportError:
     sys.exit(1)
 
 
+class CappedRetry(Retry):
+    """Retry that honors server Retry-After headers but caps the sleep.
+
+    urllib3 sleeps for the full Retry-After value with NO ceiling; a
+    rate-limiting server (Crossref/OpenAlex 429s especially) can park the
+    process for an hour inside the retry machinery, outside every request
+    timeout. Cap it so a stall becomes a bounded pause. (Root cause of a
+    42-minute silent hang, 2026-08-25.)"""
+
+    RETRY_AFTER_CAP = 30.0  # seconds
+
+    def get_retry_after(self, response):
+        retry_after = super().get_retry_after(response)
+        if retry_after is None:
+            return retry_after
+        return min(retry_after, self.RETRY_AFTER_CAP)
+
+
+
 # --- SSRF-hardened URL probe ------------------------------------------------
 # Three-state, allowlist-first URL liveness check. This is the security surface
 # of the verifier: it must never be trickable into connecting to an internal /
@@ -373,7 +392,7 @@ def first_surname(author_field: str) -> str:
 def session():
     s = requests.Session()
     s.headers.update({"User-Agent": f"deep-research/1.0 (mailto:{CONTACT})"})
-    retry = Retry(
+    retry = CappedRetry(
         total=4,
         backoff_factor=0.8,
         status_forcelist=[429, 500, 502, 503, 504],

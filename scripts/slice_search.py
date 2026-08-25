@@ -49,6 +49,25 @@ except ImportError:  # pragma: no cover - dependency preflight
     sys.stderr.write("Missing dep: pip install requests\n")
     sys.exit(1)
 
+
+class CappedRetry(Retry):
+    """Retry that honors server Retry-After headers but caps the sleep.
+
+    urllib3 sleeps for the full Retry-After value with NO ceiling; a
+    rate-limiting server (Crossref/OpenAlex 429s especially) can park the
+    process for an hour inside the retry machinery, outside every request
+    timeout. Cap it so a stall becomes a bounded pause. (Root cause of a
+    42-minute silent hang, 2026-08-25.)"""
+
+    RETRY_AFTER_CAP = 30.0  # seconds
+
+    def get_retry_after(self, response):
+        retry_after = super().get_retry_after(response)
+        if retry_after is None:
+            return retry_after
+        return min(retry_after, self.RETRY_AFTER_CAP)
+
+
 # Allow running both as `python3 scripts/slice_search.py` and `-m scripts.slice_search`.
 _ROOT = str(Path(__file__).resolve().parent.parent)
 if _ROOT not in sys.path:
@@ -81,7 +100,7 @@ def make_session():
     The ledger's ×2 worst-case bound assumes at most one automatic retry per
     call; do not raise ``total`` here without revisiting RETRY_MULTIPLIER."""
     s = requests.Session()
-    retry = Retry(
+    retry = CappedRetry(
         total=1,
         backoff_factor=0.5,
         status_forcelist=[429, 500, 502, 503, 504],
