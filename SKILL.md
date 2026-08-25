@@ -689,6 +689,7 @@ When `/deep-research [topic]` is invoked:
 9. **Round 4** — `verify_citations.py --check-urls` (+ `classify_sources.py`,
    `lit_search.py --compare-bib`) → `lint_background.py research/[slug]/sections/`
    (fix/re-fence flagged blocks) → refute adversary (non-anthropic family) → fix pass.
+   Wrap the verifier in the stall watchdog: `python3 scripts/watched.py --stale-secs 300 -- python3 scripts/verify_citations.py …`.
 10. **Round 5 (optional)** — `slice_search --only-slice` / `deepen --single-question`; re-integrate.
 11. **Export** — `export.py`, then `search.py index`.
 12. **Report** — file location, stats, citation-resolution rate, and the index summary line.
@@ -707,3 +708,25 @@ When `/deep-research [topic]` is invoked:
 | Major canonical works missing | `lit_search.py --compare-bib` |
 | Partial retrieval failure | `slice_search.py --resume` skips slices whose jsonl parses |
 | WebFetch hallucination | No-WebFetch rule — curl the raw page, grep/read the real text |
+| Silent stall in a network script | `CappedRetry` bounds Retry-After sleeps (30s); wrap long runs in `scripts/watched.py` (kills on stale output, exit 99) |
+
+## Stall watchdog
+
+Any long-running network step (`slice_search.py`, `fetch_fulltext.py`,
+`citation_chase.py`, `coverage_audit.py`, `verify_citations.py`) can go quiet if
+a server misbehaves in a way the retry caps don't cover. `scripts/watched.py`
+wraps a command, streams its output through unchanged, and kills the process
+group if output goes stale, turning a silent hang into a loud exit `99`:
+
+```bash
+python3 scripts/watched.py --stale-secs 300 -- \
+  python3 scripts/verify_citations.py research/[slug]/sections/ \
+  --output research/[slug]/round4/citation-verification.md --check-urls
+```
+
+On exit `99`: diagnose (rate limiting? network down?), then rerun — the child's
+own exit code passes through on normal completion, so the wrapper is safe as a
+default for every long network step. Keep `--stale-secs` ABOVE the wrapped
+command's legitimate quiet period (capped retries can be silent ~120s; the 300s
+default clears that). The watchdog signal is output *freshness*, never content:
+a healthy-looking progress counter with a stale mtime IS the stall signature.
