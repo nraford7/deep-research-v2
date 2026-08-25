@@ -160,6 +160,9 @@ def make_session():
 # Ingestion — tolerant markdown header extraction (NEVER raises)
 # ---------------------------------------------------------------------------
 
+_NUMBERED = __import__("re").compile(r"^\d+[.)]\s+")
+
+
 def _bullets_under(md, header):
     """Return the bullet strings under EXACT ``header`` up to the next ``##``
     header. Bullets are lines starting with ``-`` or ``*``. Non-bullet lines are
@@ -177,6 +180,10 @@ def _bullets_under(md, header):
                     break
                 if stripped.startswith("- ") or stripped.startswith("* "):
                     out.append(stripped[2:].strip())
+                elif _NUMBERED.match(stripped):
+                    # numbered lists ("1. question") are a natural synthesis
+                    # output; silently dropping them empties a paid bucket
+                    out.append(_NUMBERED.sub("", stripped, count=1).strip())
                 elif stripped in ("-", "*"):
                     pass  # bare bullet marker, no text
                 i += 1
