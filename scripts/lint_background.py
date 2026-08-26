@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """
-lint_background.py — reject invented quantities inside editorial background blocks.
+lint_background.py — reject UNCITED quantities inside editorial background blocks.
 
-Editorial background blocks (see background.py) are synthesis the writer added to
-frame a section. They are NOT independently retrieved, so any specific quantity
-inside one is unsupported by definition. This linter finds every marked block and
-rejects it if it contains a number in ANY form — digits, symbols, spelled-out
-cardinals/ordinals/scales, fractions, or word-form years and decades.
+Editorial background blocks (see background.py) are marked synthesis / explainer
+prose the writer added to frame a section. They MAY now carry substance, but an
+empirical quantity inside one must be cited: a quantity is a violation only when it
+sits in a sentence that carries NO citation marker. This linter finds every marked
+block, splits it into sentences, SKIPS any sentence carrying a citation marker
+(`[Author, Year]` / `(Author, Year)` with a 4-digit year — its quantities are
+cited), and rejects the block if any citation-free sentence contains a number in
+ANY form — digits, symbols, spelled-out cardinals/ordinals/scales, fractions, or
+word-form years and decades.
+
+Per-sentence licensing (not whole-block): a citation licenses only ITS OWN
+sentence, so an uncited quantity in a citation-free sentence still fails even when
+another sentence in the block is cited. A second, uncited number hiding inside an
+already-cited sentence is the one case the coarse lint cannot catch; that narrow
+same-sentence-laundering hole is owned by the Round-4 refute adversary, which reads
+the prose and cross-checks figures against the full-text store.
 
 Usage:
   python3 scripts/lint_background.py <path-or-dir>
@@ -81,13 +92,40 @@ QUANTITY_TRIGGERS = [
 ]
 
 
+# A citation marker: a bracketed or parenthesised reference carrying BOTH a 4-digit
+# year (18xx–20xx) AND author-like text (at least one letter), e.g. [Author, 2019],
+# [Chalmers 1996], (Dennett, 1991). A sentence carrying one is "cited" and its
+# quantities (including the citation's own year) are licensed. The letter requirement
+# stops a bare bracketed number / interval / array index from spoofing a citation:
+# `[1, 2, 2019]`, `[1900]`, `[2050]` are NOT markers and do not license a sentence.
+# A bare year with no brackets/parens is likewise NOT a citation marker.
+CITATION_MARKER = re.compile(
+    r"[\[(](?=[^\])]*[A-Za-z])[^\])]*\b(?:1[89]\d\d|20\d\d)\b[^\])]*[\])]")
+
+
+def _split_sentences(block: str):
+    """Split a block into sentences on terminal punctuation followed by whitespace.
+    Deliberately simple: a rare false boundary from an abbreviation (Dr., Ibid.) is
+    acceptable for a coarse tripwire. A block with no terminal punctuation is one
+    sentence."""
+    parts = re.split(r"(?<=[.!?])\s+", block.strip())
+    return [p for p in parts if p.strip()]
+
+
 def scan_block(block: str):
-    """Return the list of (trigger_label, matched_text) found in one block."""
+    """Return the list of (trigger_label, matched_text) quantity violations in one
+    block, applying PER-SENTENCE citation licensing: a sentence carrying a citation
+    marker is skipped (its quantities are cited); every citation-free sentence is
+    scanned for quantity triggers. An uncited quantity in a citation-free sentence is
+    a violation — a cited sibling sentence never launders the block."""
     hits = []
-    for label, pattern in QUANTITY_TRIGGERS:
-        m = pattern.search(block)
-        if m:
-            hits.append((label, m.group(0)))
+    for sentence in _split_sentences(block):
+        if CITATION_MARKER.search(sentence):
+            continue  # licensed — cited substance may carry quantities
+        for label, pattern in QUANTITY_TRIGGERS:
+            m = pattern.search(sentence)
+            if m:
+                hits.append((label, m.group(0)))
     return hits
 
 

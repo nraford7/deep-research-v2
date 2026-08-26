@@ -2,11 +2,13 @@
 """
 background.py — marking convention + candidate finder for editorial background blocks.
 
-An editorial "background" block is orienting synthesis the writer adds to frame a
-section. It is NOT independently retrieved from the corpus, so it must be marked so
-downstream steps (lint, verification) can hold it to a stricter rule: no invented
-quantities. This module owns the markers, a canonical renderer, a deterministic
-extractor, and a $0 token-overlap CANDIDATE FINDER.
+An editorial "background" block is marked synthesis / explainer prose the writer
+adds to frame a section — argument reconstruction, definitions, context. It MAY
+carry substance, so it is marked so downstream steps (lint, verification) can hold
+it to the uncited-quantity rule: an empirical quantity inside a block must be cited
+(sit in a sentence carrying a citation marker); an UNCITED quantity is a violation.
+This module owns the markers, a canonical renderer, a deterministic extractor, and
+a $0 token-overlap CANDIDATE FINDER.
 
 corpus_support is a harmless candidate finder: it NOMINATES the best-overlapping
 row for a claim but promotes nothing on its own. It cannot tell support from

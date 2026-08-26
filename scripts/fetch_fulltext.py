@@ -274,8 +274,13 @@ def _openalex_oa_pdf_by_id(work_id: str, timeout: int) -> str | None:
 
 def _fetch_row_text(url: str, is_academic: bool, max_bytes: int,
                     max_chars: int, timeout: int,
-                    row: dict | None = None) -> tuple[str, str]:
-    """Return (text, method) for one source url, or ('', reason)."""
+                    row: dict | None = None
+                    ) -> tuple[str, str, bytes | None, str | None]:
+    """Return (text, method, raw_bytes, ext) for one source url.
+
+    On failure: ('', reason, None, None). ``raw_bytes`` is the full document as
+    downloaded (capped at max_bytes) so the caller can persist the original file;
+    ``ext`` is 'pdf' or 'html'."""
     row = row or {}
     target = url
     method_prefix = ""
@@ -301,17 +306,18 @@ def _fetch_row_text(url: str, is_academic: bool, max_bytes: int,
                 # work has no OA pdf/landing/oa_url). SKIP the fetch rather than
                 # raw-GETting the openalex.org page (which 403s / returns empty).
                 # Leave the row with no text; only a real OA url is worth fetching.
-                return "", "no-oa-url"
+                return "", "no-oa-url", None, None
         # Fetching a bare doi.org link usually lands on a paywalled HTML page;
         # only worth it when OpenAlex found nothing and there IS a DOI target.
 
     data, ctype_or_reason, final_url = _safe_get(target, max_bytes, timeout)
     if data is None:
-        return "", ctype_or_reason  # reason string
+        return "", ctype_or_reason, None, None  # reason string
     text, method = _extract(final_url or target, ctype_or_reason, data)
     if len(text) > max_chars:
         text = text[:max_chars]
-    return text, f"{method_prefix}{method}"
+    ext = "pdf" if method == "pdf" else "html"
+    return text, f"{method_prefix}{method}", data, ext
 
 
 def process_run(run_dir: Path, min_chars: int, max_bytes: int,
@@ -328,12 +334,17 @@ def process_run(run_dir: Path, min_chars: int, max_bytes: int,
             continue
         changed = False
         for row in rows:
-            if (row.get("text_chars") or 0) >= min_chars:
-                continue  # Exa already gave us enough — leave it.
             url = (row.get("url") or "").strip()
             if not url:
                 continue
+            # Attempt a direct full-text download for EVERY source (not just the
+            # ones Exa left thin). We keep whichever text is longer — Exa's
+            # snippet or the document we fetch ourselves — and always persist the
+            # raw file when the fetch lands one. A source is only left at its Exa
+            # snippet when the direct fetch fails (paywall/404/no-OA), i.e. when
+            # we genuinely cannot access the full document.
             summary["attempted"] += 1
+            existing_chars = row.get("text_chars") or 0
             # Citation-chase rows resolve via OpenAlex id / DOI, so route
             # them through the academic OA-PDF path rather than a raw GET
             # (a bare openalex.org URL returns HTTP 403 on a raw fetch).
@@ -344,9 +355,21 @@ def process_run(run_dir: Path, min_chars: int, max_bytes: int,
                 or bool(row.get("openalex_id"))
                 or "openalex.org/W" in url
             )
-            text, method = _fetch_row_text(
+            text, method, raw, ext = _fetch_row_text(
                 url, is_academic, max_bytes, max_chars, timeout, row=row)
-            if text and len(text) >= min_chars:
+
+            # Persist the original downloaded document whenever we got one,
+            # regardless of whether its extracted text beats the Exa snippet.
+            if raw is not None:
+                sources_dir.mkdir(parents=True, exist_ok=True)
+                base = _source_filename(row)[:-4]  # strip trailing '.txt'
+                raw_name = f"{base}.{ext or 'bin'}"
+                (sources_dir / raw_name).write_bytes(raw)
+                row["raw_path"] = f"sources/{raw_name}"
+                changed = True
+
+            # Keep the longer text: our direct fetch vs. the existing Exa snippet.
+            if text and len(text) > existing_chars:
                 sources_dir.mkdir(parents=True, exist_ok=True)
                 fname = _source_filename(row)
                 (sources_dir / fname).write_text(text, encoding="utf-8")
@@ -361,7 +384,9 @@ def process_run(run_dir: Path, min_chars: int, max_bytes: int,
                       file=sys.stderr)
             else:
                 summary["skipped"] += 1
-                reason = method if not text else "too-short"
+                # Distinguish "could not fetch" from "fetched, but Exa's snippet
+                # was already as long or longer" (kept, not replaced).
+                reason = method if not text else "kept-existing"
                 summary["failures"][reason] = \
                     summary["failures"].get(reason, 0) + 1
                 print(f"  · skip ({reason})  {url}", file=sys.stderr)
@@ -405,7 +430,9 @@ def main(argv=None) -> int:
         description="Fetch full text for Round-1 sources Exa left thin.")
     ap.add_argument("--run-dir", required=True, type=Path)
     ap.add_argument("--min-chars", type=int, default=DEFAULT_MIN_CHARS,
-                    help="rows with fewer stored chars get a direct-fetch attempt")
+                    help="RETAINED for backward-compat; no longer gates fetching. "
+                         "Every row is now attempted and the longer of "
+                         "(Exa snippet, direct fetch) is kept — see process_run.")
     ap.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     ap.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
     ap.add_argument("--timeout", type=int, default=20)

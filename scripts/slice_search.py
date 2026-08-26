@@ -85,9 +85,11 @@ NUM_RESULTS = 15
 
 # Full-text retrieval: ask Exa to extract each result's page/PDF text (server-side,
 # so PDF-backed white papers, reports, and articles are read too — not just HTML).
-# Capped so a single source can't blow the synthesis context. Override with
-# DR_TEXT_MAX_CHARS. Set to 0 to fall back to highlights-only.
-TEXT_MAX_CHARS = int(os.environ.get("DR_TEXT_MAX_CHARS", "12000"))
+# Default ~40k chars (~6,500 words) per source so full primary texts survive into the
+# writing stage instead of arriving pre-clipped; still capped so one source can't blow
+# the synthesis context. Override with DR_TEXT_MAX_CHARS (set lower for cheap runs).
+# Set to 0 to fall back to highlights-only.
+TEXT_MAX_CHARS = int(os.environ.get("DR_TEXT_MAX_CHARS", "40000"))
 
 # The per-call worst-case pre-charge (fee × retry multiplier). Single source of
 # truth is scripts/cost.py — never hardcode $0.04 here.

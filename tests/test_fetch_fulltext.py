@@ -57,19 +57,23 @@ def _write_slice(run_dir, name, rows):
     return p
 
 
-def test_thin_row_filled_fat_row_untouched(monkeypatch, tmp_path):
+def test_every_row_attempted_longer_text_wins_raw_always_saved(monkeypatch, tmp_path):
+    # Every source is now attempted (not just thin ones). The thin row's text is
+    # replaced by the longer direct fetch; the fat row already has a longer Exa
+    # snippet so its TEXT is kept — but its raw document is still downloaded.
     thin = {"url": "https://a.com/thin", "slice": "web", "text_chars": 0, "tier": "web"}
     fat = {"url": "https://a.com/fat", "slice": "web", "text_chars": 9000,
            "text_path": "sources/web_deadbeef.txt", "tier": "web"}
     _write_slice(tmp_path, "web", [thin, fat])
 
-    body = "Rich full document body. " * 50
+    body = "Rich full document body. " * 50  # ~1249 chars — beats thin(0), not fat(9000)
     monkeypatch.setattr(ff, "_safe_get",
                         lambda url, mb, to: (body.encode(), "text/html", url))
 
     summary = ff.process_run(tmp_path, min_chars=400, max_bytes=10_000_000,
                              max_chars=20_000, timeout=5)
-    assert summary["fetched"] == 1 and summary["attempted"] == 1
+    # Both rows attempted; only the thin row's text replaced (fat's snippet longer).
+    assert summary["attempted"] == 2 and summary["fetched"] == 1
 
     rows = [json.loads(l) for l in
             (tmp_path / "round1" / "slice_web.jsonl").read_text().splitlines() if l.strip()]
@@ -77,7 +81,13 @@ def test_thin_row_filled_fat_row_untouched(monkeypatch, tmp_path):
     unchanged = next(r for r in rows if r["url"].endswith("/fat"))
     assert filled["text_chars"] >= 1200 and filled["fulltext_method"] == "html"
     assert (tmp_path / "round1" / filled["text_path"]).read_text().startswith("Rich full")
-    assert unchanged["text_path"] == "sources/web_deadbeef.txt"  # not re-fetched
+    # Fat row's TEXT is kept (Exa snippet longer), but its raw file is saved.
+    assert unchanged["text_chars"] == 9000
+    assert unchanged["text_path"] == "sources/web_deadbeef.txt"  # text not replaced
+    # Both rows downloaded their original document to sources/*.html.
+    for r in (filled, unchanged):
+        assert r["raw_path"].startswith("sources/") and r["raw_path"].endswith(".html")
+        assert (tmp_path / "round1" / r["raw_path"]).read_bytes() == body.encode()
 
     manifest = json.loads((tmp_path / "round1" / "fulltext_manifest.json").read_text())
     assert manifest["by_method"] == {"html": 1}

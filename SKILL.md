@@ -56,7 +56,7 @@ Round -1   FRAME            (default-on, skippable) coach the umbrella question 
 Round 0    SCOPE            scope.py → scope.json (domain + source priorities)
               ↓
 Round 1    RETRIEVE         slice_search.py → Exa slices (full text) + academic anchor
-              ↓             fetch_fulltext.py → read PDFs/pages Exa left thin (incl. OA papers)
+              ↓             fetch_fulltext.py → download full text of EVERY source (keep longest; save raw)
               ↓             evidence_gate.py → MUST pass (exit 0) before any synthesis
               ↓             citation_chase.py → one-hop citation graph fill (co-citation + citing works), re-gate
               ↓             coverage audit → deep-research-squad skill (DEFAULT: checklist + panel + verify) — coverage_audit.py is the single-model fallback — name expected-but-absent coverage, fill, re-gate
@@ -197,24 +197,30 @@ and exits `22`.
 enable more slices in TOML, re-run `slice_search.py --resume`, and re-gate. Only when
 the gate returns `0` may Round 2 begin.
 
-**Step 1.4 — full-text fill (recommended).** Some sources come back thin: the
-academic anchor is metadata-only, and Exa does not always render every PDF-backed
-white paper or report. This pass reads those documents directly — resolving an
-**open-access PDF via OpenAlex** for DOI/academic rows, fetching plain PDFs and
-pages as-is — then extracts the text (pypdf for PDFs, tag-strip for HTML) into the
-same `round1/sources/` store and updates each thin row's `text_path`/`text_chars`.
+**Step 1.4 — full-text download (recommended).** This pass attempts a direct
+full-text download of **every** source — not just the ones Exa left thin —
+resolving an **open-access PDF via OpenAlex** for DOI/academic rows and fetching
+plain PDFs and pages as-is. For each row it keeps whichever text is **longer**,
+the Exa snippet or the document it fetches itself, so a source is only left at its
+snippet when the document is genuinely unreachable (paywall / 404 / no OA copy).
+Extracted text (pypdf for PDFs, tag-strip for HTML) goes to `round1/sources/<file>.txt`
+and the row's `text_path`/`text_chars`; the **original downloaded file** is also
+saved alongside as `round1/sources/<file>.pdf|.html` and recorded on the row as
+`raw_path`.
 
 ```bash
 python3 scripts/fetch_fulltext.py \
-  --run-dir research/[slug] \
-  --min-chars 400        # rows with fewer stored chars get a direct-fetch attempt
+  --run-dir research/[slug]
 ```
 
 Every fetch goes through the SSRF-hardened, IP-pinned path reused from
 `verify_citations` (redirects re-vetted per hop); per-source **fail-open**; `$0` —
 never ledgered; **no WebFetch** (raw bytes read directly). Writes
-`round1/fulltext_manifest.json` (attempted / fetched / by-method / failures).
-Requires `pypdf` (in `requirements.txt`); without it, PDF rows skip gracefully.
+`round1/fulltext_manifest.json` (attempted / fetched / by-method / failures; a
+`kept-existing` failure means the fetch landed but the Exa snippet was already as
+long or longer). Requires `pypdf` (in `requirements.txt`); without it, PDF rows
+skip gracefully. Set `CONTACT_EMAIL` (in `~/.env`) so OpenAlex OA-PDF lookups use
+the polite pool and resolve more open-access documents.
 
 **Step 1.4b · citation chase (run after the gate passes, before the coverage audit).**
 This does evidence-grounded graph fill FIRST, so the model-memory coverage auditor then
@@ -341,9 +347,10 @@ acceptable output. If you cannot cite a partition and will not fence it as edito
 background, do NOT emit it.
 
 **What actually enforces this.** `lint_background.py` is a numeric tripwire INSIDE the
-fences only: it flags a quantity (number, date, rate, share) that appears in a fenced
-block, and it inspects nothing else: it does NOT read unfenced prose and does NOT check
-citations. So the lint alone cannot catch an uncited partition dropped into bare prose.
+fences only: it flags an **uncited** quantity (number, date, rate, share) — one in a
+fenced sentence that carries no `[Author, Year]` citation marker — and it inspects
+nothing else: it does NOT read unfenced prose, and a *cited* quantity inside a fence
+passes. So the lint alone cannot catch an uncited partition dropped into bare prose.
 The enforcement MECHANISM that catches an uncited empirical claim before it reaches the
 Bible is the Round-4 refute-mode ADVERSARY: an LLM refute pass that reads the actual prose
 (fenced and unfenced) and refutes unsupported claims, backed by author discipline in
@@ -399,13 +406,46 @@ Round 1: a per-question fail-open skips + continues (exit 0); a cap breach write
 
 ## Round 3 — Integration
 
-Read four inputs and integrate by topic section: the Round-1 briefs, the Round-1
-retrieved **full texts** (`round1/sources/*.txt`, the actual documents, not just the
-highlight briefs), the Round-2 synthesis (`round2/synthesis.md`, which carries the field
-map), and the Round-2.5 answers. Dispatch section-planner subagents + a reconciler, then
-**one integration subagent per section** in parallel (each ≤ ~40k words of input).
-Preserve every citation, every `[as of: <date>]` and `[confidence: …]` tag, and every
-unique finding; present differing figures as `[disputed: …]`, never a silent average.
+Read four inputs and **explain the field, position by position** — the Round-1 briefs, the
+Round-1 retrieved **full texts** (`round1/sources/*.txt`, the actual documents, not just
+the highlight briefs), the Round-2 synthesis (`round2/synthesis.md`, which carries the
+field map), and the Round-2.5 answers. The job of this round is to TEACH the material, not
+to compress it into a cited outline: reconstruct the arguments in full and make the
+disagreements legible. Preserve every citation, every `[as of: <date>]` and
+`[confidence: …]` tag, and every unique finding; present differing figures as
+`[disputed: …]`, never a silent average — but do this in service of explanation, cutting
+abstract connective prose before ever cutting a specific argument or example.
+
+**The unit of the report is the position, not the topic bucket.** The section planner
+creates **one section per major position / argument / school** the corpus supports, not
+an arbitrary set of topic headings. Dispatch section-planner subagents + a reconciler,
+then **one integration subagent per section** in parallel (each ≤ ~40k words of input).
+
+**Deep-explainer template — every integration subagent fills all four parts, in full
+prose, for its position:**
+1. **The claim.** State the position plainly: what it asserts about the question.
+2. **The argument.** Reconstruct the reasoning premises → conclusion — WHY a reasonable
+   person holds it, not just that they do. Walk the steps; do not gesture at them.
+3. **The strongest objection AND the reply.** Name the most serious challenge the
+   literature raises, then the position's best answer to it. This is the live
+   disagreement, written out — never a bare "critics disagree."
+4. **How it differs from rival positions.** The specific contrast(s) that separate this
+   position from its neighbours — the fault line, not a restatement.
+
+**Depth targets.** Aim for roughly **2–4k words per position section** — enough to make
+the argument and its objection genuinely understandable. The report **scales with the
+literature: there is NO global length cap.** A field with a dozen live positions yields a
+long report; that is correct, not bloat. When a section subagent must choose between a
+shorter section and keeping a specific argument or example, it **keeps the argument** and
+trims connective prose instead. Final integration note: **expand, don't summarize** — the
+failure mode this round exists to prevent is a thin enriched outline.
+
+> **Input-budget note (with the raised text cap).** `DR_TEXT_MAX_CHARS` now defaults to
+> ~40k chars (~6.5k words) per source, so a handful of very long primary sources can crowd
+> a single section subagent's ≤ ~40k-words input window. The section planner should watch
+> per-section input budget and, when a few sources are very long, split the section or
+> select the most relevant passages rather than letting two or three documents starve the
+> rest.
 
 Carry the **field map** through from `round2/synthesis.md`: keep the near-top
 mainstream-vs-heterodox / settled-vs-contested section, and hold its HARD RULE: every
@@ -413,17 +453,18 @@ partition either cited to retrieved evidence or fenced in
 `<!-- editorial:background -->` … `<!-- /editorial -->`. An uncited partition asserted
 as bare prose is not acceptable output. The enforcement mechanism is the Round-4
 refute-mode adversary reading the prose (an LLM refute pass, review-based, not a
-mechanical proof; the lint only scans for numbers inside fences), backed by author
+mechanical proof; the lint only scans for uncited numbers inside fences), backed by author
 discipline in following the rule.
 
 **Section subagents: background is fenced-only.** A section subagent MAY add
 background / definitional / mechanistic / historical context to orient the reader, but
 ONLY inside a fenced `<!-- editorial:background -->` … `<!-- /editorial -->` block
-(emit it via `render_background`, `scripts/background.py`). Such a block must contain
-NO empirical or quantitative claim: no number, date, measurement, rate, share, or
-named-study finding. Every empirical/quantitative claim must instead be retrieved and
-carried as normal cited prose. Framing prose that belongs to the corpus but sits
-outside a fence is uncited output, not background.
+(emit it via `render_background`, `scripts/background.py`). A fenced block MAY carry
+empirical or quantitative substance — a number, date, measurement, rate, share, or
+named-study finding — **but every such quantity must be CITED**: it must sit in a
+sentence carrying an `[Author, Year]` citation marker. An **uncited** quantity inside a
+fence is a violation (the lint catches it). Framing prose that belongs to the corpus but
+sits outside a fence is uncited output, not background.
 
 ### Source authority: how to weigh evidence
 
@@ -484,16 +525,18 @@ Optional companions: `classify_sources.py` (tier / quality score) and
 `lit_search.py --compare-bib` (canonical works missing from the bibliography).
 
 **Background-block lint (orchestrator-run checklist step).** Before the adversary,
-lint every fenced editorial block for invented quantities:
+lint every fenced editorial block for UNCITED quantities:
 
 ```bash
 python3 scripts/lint_background.py research/[slug]/sections/
 ```
 
-Exit `0` = clean; exit `1` = at least one block names a quantity, and the offending
-blocks are printed. The orchestrator MUST resolve each flagged quantity one of three
-ways: **(a)** cite it, retrieve a source and rewrite the figure as normal cited prose
-carrying that `[Author, Year]`; **(b)** keep the block fenced but rephrase it to remove
+Exit `0` = clean; exit `1` = at least one fenced sentence names a quantity with NO
+`[Author, Year]` citation, and the offending blocks are printed (a *cited* quantity in a
+fence passes and is never flagged). The orchestrator MUST resolve each flagged **uncited**
+quantity one of three ways: **(a)** cite it, retrieve a source and add the `[Author, Year]`
+in the same sentence (it may then stay inside the fence — cited substance is allowed), or
+rewrite it as normal cited prose; **(b)** keep the block fenced but rephrase it to remove
 the quantity (drop the number, keep the qualitative framing); or **(c)** cut the claim.
 NEVER move the quantity out of the fence into unfenced prose without a citation: that
 creates the exact uncited-empirical-claim state the cited-or-fenced rule forbids. This
@@ -517,6 +560,18 @@ independent. Selection walks the configured `adversary` chain (default
 family ≠ `anthropic`; if none qualify it warns and falls back to the synthesizer (see
 [below](#provider-family--adversary-selection)). Feed the adversary the section files
 plus `round4/citation-verification.md`; write its report to `round4/factcheck.md`.
+
+**Shard the adversary by section for long reports.** A single refute pass over a
+15–40k-word report is too shallow to spot-check every quote and attribution — the deep
+per-position sections (Round 3) produce reports well past that. So for any report over
+**~12k words**, dispatch **one refute-adversary per section group** rather than one pass
+over the whole document, each cross-checking ITS sections' quotes and attributions
+against the full-text store (`round1/sources/*.txt`) and writing a shard report
+(`round4/factcheck_<group>.md`, merged into `round4/factcheck.md`). **The
+different-provider-family rule holds per shard:** every shard still runs on a provider
+whose `family` ≠ `anthropic`. (This session, sharding into two adversaries caught a
+fabricated block quote with a fake-precise citation that a single whole-document pass
+skimmed past.)
 
 **Adversary mandate: police every editorial:background block.** The adversary MUST
 scrutinize EVERY `<!-- editorial:background -->` … `<!-- /editorial -->` block for
@@ -669,9 +724,10 @@ RUN=research/grid-battery
 python3 scripts/scope.py --topic "$TOPIC" --scope "LCOE trends, chemistry mix, capacity buildout, policy drivers" --output "$RUN/scope.json"
 python3 scripts/slice_search.py --run-dir "$RUN" --topic "$TOPIC" --max-retrieval-usd 1
 python3 scripts/evidence_gate.py --run-dir "$RUN"        # must exit 0 before synthesis
-python3 scripts/fetch_fulltext.py --run-dir "$RUN"       # read PDFs/OA papers Exa left thin
+python3 scripts/fetch_fulltext.py --run-dir "$RUN"       # download full text of every source (keep longest; save raw)
 python3 scripts/citation_chase.py --run-dir "$RUN" --topic "$TOPIC"   # one-hop citation-graph fill, re-gate (fail-closed: 0 ran · 40 OpenAlex unreachable · 41 no resolvable seeds · 22 still-thin → surface, don't proceed as if expansion succeeded)
 python3 scripts/coverage_audit.py --run-dir "$RUN" --topic "$TOPIC"   # name + fill expected-but-absent coverage, re-gate
+python3 scripts/fetch_fulltext.py --run-dir "$RUN"       # SECOND pass: pull full text for the gap-slice sources the audit just added (fail-open · $0 · never ledgered)
 # → Round 2 synthesis subagent (emit the six EXACT headers) → round2/synthesis.md
 python3 scripts/deepen_questions.py --run-dir "$RUN" --round2-file "$RUN/round2/synthesis.md"
 # → Round 3 integration → sections/ → Round 4:
@@ -701,6 +757,10 @@ When `/deep-research [topic]` is invoked:
    on this run dir — checklist + sibling sweep + persona panel + per-gap adversarial verify,
    then fills via `slice_search.py --add-slice`, re-gate. Writes the same `round1/coverage_gaps.md`.
    FALLBACK (squad undispatchable): `coverage_audit.py --run-dir … --topic …`. Never run both.
+   **Then repeat `fetch_fulltext.py --run-dir …`** — a SECOND full-text pass so the
+   gap-slice sources the audit just added are pulled to full text too, not left as
+   snippets (the first pass ran before the audit doubled the corpus). Fail-open, $0,
+   never ledgered.
 6. **Round 2 synthesis** — one subagent; emit the six EXACT headers to `round2/synthesis.md`.
 7. **Round 2.5 deepening** — `deepen_questions.py --round2-file …`.
 8. **Round 3 integration** — read round1 briefs + `sources/*.txt` + `round2/synthesis.md`

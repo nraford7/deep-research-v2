@@ -82,6 +82,45 @@ def test_arabic_digit_rejected_via_cli(tmp_path):
     assert "VIOLATION" in proc.stdout
 
 
+# --- CITED SUBSTANCE PASSES (uncited-only rule) -----------------------------
+
+def test_cited_sentence_passes():
+    """A fenced sentence carrying a citation marker ([Author, Year]) is licensed:
+    its quantities — including the citation's own year — are NOT flagged."""
+    # Citation only, no other quantity — the year 1991 must not trip the digit rule.
+    assert _violations_in("Mind is unified, per [Dennett 1991].") == []
+    # A real cited quantity inside the fence passes.
+    assert _violations_in(
+        "Consciousness splits into two streams [James, 1890].") == []
+
+
+def test_uncited_number_still_fails_even_beside_a_cited_sentence():
+    """GUARDRAIL INVARIANT: a citation licenses only ITS OWN sentence. An uncited
+    quantity in a citation-free sentence of the same block STILL fails — a cited
+    sibling never launders the block."""
+    # Cited sentence alone → clean.
+    assert _violations_in("Two streams merged [James, 1890].") == []
+    # Uncited-number sentence alone → flagged.
+    assert _violations_in("Then 47 rivals rejected it.")
+    # Both in one block → the uncited 47 is still caught.
+    hits = _violations_in(
+        "Two streams merged [James, 1890]. Then 47 rivals rejected it.")
+    assert hits, "uncited number in a citation-free sentence must still fail"
+
+
+def test_bare_year_without_citation_still_fails():
+    """A bare year with no bracketed/parenthesised citation is NOT licensed."""
+    assert _violations_in("Adoption collapsed in 2019.")
+
+
+def test_bracketed_number_without_author_is_not_a_citation():
+    """A bracketed token with a 4-digit year but NO author text (interval, array,
+    bare year) must NOT spoof a citation and license a sibling uncited quantity."""
+    assert _violations_in("The array holds [1, 2, 2019] items and 500 uncited rows.")
+    assert _violations_in("The set [1900] of items numbered 42.")
+    assert _violations_in("We counted 88 [2050] cases.")
+
+
 # --- MALFORMED FENCE: an unbalanced marker must FAIL, not slip through ------
 
 def test_unclosed_fence_fails_via_cli(tmp_path):
