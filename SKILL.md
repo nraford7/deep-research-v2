@@ -59,7 +59,7 @@ Round 1    RETRIEVE         slice_search.py → Exa slices (full text) + academi
               ↓             fetch_fulltext.py → read PDFs/pages Exa left thin (incl. OA papers)
               ↓             evidence_gate.py → MUST pass (exit 0) before any synthesis
               ↓             citation_chase.py → one-hop citation graph fill (co-citation + citing works), re-gate
-              ↓             coverage_audit.py → name expected-but-absent coverage, fill the gaps, re-gate
+              ↓             coverage audit → deep-research-squad skill (DEFAULT: checklist + panel + verify) — coverage_audit.py is the single-model fallback — name expected-but-absent coverage, fill, re-gate
 Round 2    SYNTHESIZE       compare the corpus; emit the six EXACT headers (4 feed buckets)
               ↓
 Round 2.5  DEEPEN           deepen_questions.py → root-cause / consequence / gap answers
@@ -243,11 +243,28 @@ the chase returns `0`.
 
 **Step 1.5 · coverage audit (run after the gate passes).** The gate asks "is the
 corpus thick enough?"; this asks a different question: "for THIS scope, what coverage a
-competent reader would expect is still absent?" An LLM enumerates expected-but-absent
-coverage bounded to the run's scope, pairs each gap with one scope-bounded Exa query,
-fires each as an ad-hoc gap slice (ledger-charged, visible to the gate), re-runs the
-gate, then asks whether material gaps remain. The loop stops when no gaps remain, the
-round ceiling is hit, or the retrieval ledger cap trips (graceful exit 21).
+competent reader would expect is still absent?"
+
+**DEFAULT — use the `deep-research-squad` skill.** Every run performs Step 1.5 via the
+`deep-research-squad` skill, not the single-model script. Invoke it now (it takes this
+same run dir). The squad runs a cheap mechanical scope-checklist pass (every technique
+the scope names + a disciplined sibling sweep for in-domain methods the scope forgot),
+THEN four isolated reader personas for the depth gaps a checklist can't see, merges
+(scope-named gaps cap-exempt), and adversarially verifies every gap with a per-gap
+refuter BEFORE any Exa spend. Head-to-head on a real corpus it beat the single-model
+script on depth and killed a false positive the script would have paid to fill; the
+checklist pass keeps the script's one advantage (dutiful named-technique breadth). The
+squad writes the SAME `round1/coverage_gaps.md` artifact this pipeline expects, plus
+`round1/squad_audit.md`, and reuses `slice_search.py --add-slice` for the fills — so
+everything downstream (Round 2 onward) is unchanged. In an interactive run the squad
+shows a skippable cast card; in headless/cron runs it skips that silently and still runs.
+
+**FALLBACK — the single-model script** (`coverage_audit.py`), for when the squad
+genuinely cannot be dispatched (e.g. a constrained subprocess with no subagent
+capability). It enumerates expected-but-absent coverage with ONE model, pairs each gap
+with one scope-bounded Exa query, fires each as an ad-hoc gap slice, re-gates, and asks
+whether gaps remain — no checklist stage, no adversarial verification, so it can spend
+budget on a false gap. Use it only when the squad is unavailable:
 
 ```bash
 python3 scripts/coverage_audit.py \
@@ -256,9 +273,9 @@ python3 scripts/coverage_audit.py \
   --max-audit-rounds 2         # optional; ceiling on fill-and-re-audit loops
 ```
 
-It writes only `round1/coverage_gaps.md` (each gap + its query) and the gap slices its
-fills produce: ZERO Bible prose. Naming and filling gaps is its whole job; synthesis is
-Round 2's.
+Both paths write only `round1/coverage_gaps.md` (each gap + its query) and the gap slices
+their fills produce: ZERO Bible prose. Naming and filling gaps is the whole job; synthesis
+is Round 2's. NEVER run both in the same round.
 
 **Fail-CLOSED exit codes (read them before proceeding).** Exit `0` means the audit RAN
 and coverage is adequate: only then is coverage verified. A NONZERO exit means the audit
@@ -680,8 +697,10 @@ When `/deep-research [topic]` is invoked:
    citing-works expansion, then re-gate. Fail-closed exits: 0 = ran; 40 = OpenAlex unreachable;
    41 = no resolvable seeds; 22 = still thin. On any non-zero, surface the code, do NOT proceed
    as if expansion succeeded.
-5. **Coverage audit:** `coverage_audit.py --run-dir … --topic …`; name expected-but-absent
-   coverage, fill the gaps, re-gate (graceful exit 21 on cap breach).
+5. **Coverage audit (DEFAULT: the `deep-research-squad` skill):** invoke `deep-research-squad`
+   on this run dir — checklist + sibling sweep + persona panel + per-gap adversarial verify,
+   then fills via `slice_search.py --add-slice`, re-gate. Writes the same `round1/coverage_gaps.md`.
+   FALLBACK (squad undispatchable): `coverage_audit.py --run-dir … --topic …`. Never run both.
 6. **Round 2 synthesis** — one subagent; emit the six EXACT headers to `round2/synthesis.md`.
 7. **Round 2.5 deepening** — `deepen_questions.py --round2-file …`.
 8. **Round 3 integration** — read round1 briefs + `sources/*.txt` + `round2/synthesis.md`
