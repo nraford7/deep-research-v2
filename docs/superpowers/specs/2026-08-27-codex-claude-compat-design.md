@@ -58,4 +58,3 @@ Verification must include:
 4. Codex skill validation with `quick_validate.py`.
 5. A minimal live `codex exec` subscription smoke test that returns a fixed short response without an API key in its subprocess environment.
 6. Filesystem checks proving both runtime discovery paths resolve to the canonical clone.
-
