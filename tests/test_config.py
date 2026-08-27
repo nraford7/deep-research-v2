@@ -39,6 +39,40 @@ def test_load_config_no_toml_uses_builtins_from_env():
     assert providers["claude"].api_key == "sk-a"
     assert set(agents) == set(config.BUILTIN_AGENT_TYPES)          # all agent types always present
 
+
+def test_detect_host_prefers_codex_markers():
+    assert config.detect_host({"CODEX_SESSION_ID": "c", "CLAUDECODE": "1"}) == "codex"
+
+
+def test_load_config_adds_codex_subscription_provider(monkeypatch):
+    monkeypatch.setattr(config.shutil, "which", lambda command: f"/bin/{command}")
+    providers, _ = config.load_config([], {"CODEX_SESSION_ID": "c"})
+    assert providers["codex-sub"].command == "codex"
+    assert providers["codex-sub"].family == "openai"
+
+
+def test_load_config_adds_claude_subscription_provider(monkeypatch):
+    monkeypatch.setattr(config.shutil, "which", lambda command: f"/bin/{command}")
+    providers, _ = config.load_config([], {"CLAUDECODE": "1"})
+    assert providers["claude-sub"].command == "claude"
+    assert providers["claude-sub"].family == "anthropic"
+
+
+def test_load_config_adds_no_subscription_provider_for_unknown_host(monkeypatch):
+    monkeypatch.setattr(config.shutil, "which", lambda command: f"/bin/{command}")
+    providers, _ = config.load_config([], {"OTHER_RUNTIME": "1"})
+    assert "codex-sub" not in providers
+    assert "claude-sub" not in providers
+
+
+def test_explicit_toml_provider_overrides_implicit_subscription_provider(tmp_path, monkeypatch):
+    p = tmp_path / "deeper-research.toml"
+    p.write_text('[providers.codex-sub]\napi_type="cli"\ncommand="sh"\nfamily="custom"\n')
+    monkeypatch.setattr(config.shutil, "which", lambda command: f"/bin/{command}")
+    providers, _ = config.load_config([p], {"CODEX_SESSION_ID": "c"})
+    assert providers["codex-sub"].command == "sh"
+    assert providers["codex-sub"].family == "custom"
+
 def test_load_config_toml_inline_and_env_ref(tmp_path):
     p = tmp_path / "deeper-research.toml"
     p.write_text(textwrap.dedent('''
@@ -271,6 +305,13 @@ def test_pick_provider_uses_default_when_available():
     providers = {"kimi": _p("kimi"), "claude": _p("claude")}
     got = config.pick_provider(providers, "utility", {"utility": "kimi"})
     assert got is not None and got.name == "kimi"
+
+
+def test_pick_provider_prefers_active_host_subscription_without_default(monkeypatch):
+    providers = {"codex-sub": _p("codex-sub"), "claude-sub": _p("claude-sub")}
+    monkeypatch.setattr(config, "detect_host", lambda env=None: "codex", raising=False)
+    got = config.pick_provider(providers, "utility", {})
+    assert got is not None and got.name == "codex-sub"
 
 def test_pick_provider_falls_back_when_default_absent():
     # default names a provider that isn't configured -> fall through to fallback order

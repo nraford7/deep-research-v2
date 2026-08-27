@@ -177,6 +177,29 @@ def test_run_config_slice_xor_violation_raises(tmp_path):
 
 # --- adversary selection ------------------------------------------------------
 
+def test_adversary_excludes_the_actual_openai_synthesizer_family():
+    providers = {
+        "codex-sub": config.Provider("codex-sub", "cli", "", "", command="codex", family="openai"),
+        "chatgpt": config.Provider("chatgpt", "openai", "k", "m", family="openai"),
+        "claude": config.Provider("claude", "anthropic", "k", "m", family="anthropic"),
+    }
+    adversary, warning = config._resolve_adversary(
+        ["chatgpt", "claude"], providers, "codex-sub")
+    assert adversary == "claude"
+    assert warning is None
+
+
+def test_adversary_uses_host_family_when_synthesizer_is_absent(monkeypatch):
+    monkeypatch.setattr(config, "detect_host", lambda env=None: "codex")
+    providers = {
+        "chatgpt": config.Provider("chatgpt", "openai", "k", "m", family="openai"),
+        "claude": config.Provider("claude", "anthropic", "k", "m", family="anthropic"),
+    }
+    adversary, warning = config._resolve_adversary(
+        ["chatgpt", "claude"], providers, "missing")
+    assert adversary == "claude"
+    assert warning is None
+
 def test_adversary_picks_first_available_non_anthropic(tmp_path):
     # chain names codex (not configured) then grok (configured) -> picks grok
     p = tmp_path / "c.toml"
@@ -204,10 +227,11 @@ def test_adversary_all_anthropic_warns_and_falls_back(tmp_path):
 
 
 def test_adversary_skips_unconfigured_chain_entries(tmp_path):
-    # default chain grok/chatgpt/gemini, but only chatgpt configured -> picks chatgpt
+    # default chain grok/chatgpt/gemini, but only OpenAI/chatgpt is configured:
+    # it cannot count as an independent review of an OpenAI synthesis run.
     rc = config.load_run_config(toml_paths=[], env={"OPENAI_API_KEY": "sk-o"})
     assert rc.adversary == "chatgpt"
-    assert rc.adversary_warning is None
+    assert rc.adversary_warning is not None
 
 
 def test_adversary_default_chain_picks_grok_when_all_keys():

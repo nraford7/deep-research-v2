@@ -10,6 +10,7 @@ import os
 import random
 import shutil
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +39,22 @@ class AgentType:
     system_prompt: str
     provider: str | None = None         # explicit mapping override
     requires_web_search: bool = False
+
+
+@dataclass(frozen=True)
+class HostSpec:
+    name: str
+    markers: tuple[str, ...]
+    provider_name: str
+    command: str
+    family: str
+
+
+# Ordered deliberately: Codex must win when both runtime marker families exist.
+HOST_SPECS: tuple[HostSpec, ...] = (
+    HostSpec("codex", ("CODEX_SESSION_ID",), "codex-sub", "codex", "openai"),
+    HostSpec("claude", ("CLAUDECODE",), "claude-sub", "claude", "anthropic"),
+)
 
 
 # --- System prompts ---
@@ -186,6 +203,19 @@ DEFAULT_PRICING = {name: spec["pricing"] for name, spec in BUILTIN_PROVIDER_SPEC
 
 class ConfigError(Exception):
     pass
+
+
+def _host_spec(name: str | None) -> HostSpec | None:
+    return next((spec for spec in HOST_SPECS if spec.name == name), None)
+
+
+def detect_host(env: Mapping[str, str] | None = None) -> str | None:
+    """Return the invoking runtime name, preferring Codex when markers overlap."""
+    environment = os.environ if env is None else env
+    for spec in HOST_SPECS:
+        if any(environment.get(marker) for marker in spec.markers):
+            return spec.name
+    return None
 
 
 def _has_web_search(provider):
@@ -344,7 +374,8 @@ def load_defaults(toml_paths):
     return out
 
 
-def pick_provider(providers, role, defaults, fallback=("claude-sub", "claude", "chatgpt")):
+def pick_provider(providers, role, defaults, fallback=("claude-sub", "claude", "chatgpt"),
+                  host=None):
     """Resolve a provider for a one-off role (e.g. 'utility'): the [defaults][role]
     provider if configured, else the first available provider in `fallback`, else any
     available provider, else None."""
@@ -353,6 +384,9 @@ def pick_provider(providers, role, defaults, fallback=("claude-sub", "claude", "
     name = defaults.get(role)
     if name and name in providers:
         return providers[name]
+    host_spec = _host_spec(detect_host() if host is None else host)
+    if host_spec is not None and host_spec.provider_name in providers:
+        return providers[host_spec.provider_name]
     for fb in fallback:
         if fb in providers:
             return providers[fb]
@@ -361,6 +395,12 @@ def pick_provider(providers, role, defaults, fallback=("claude-sub", "claude", "
 
 def load_config(toml_paths, env):
     providers = {n: p for n in BUILTIN_PROVIDER_SPECS if (p := _builtin_provider(n, env))}
+    host_spec = _host_spec(detect_host(env))
+    if host_spec is not None and shutil.which(host_spec.command) is not None:
+        providers[host_spec.provider_name] = Provider(
+            name=host_spec.provider_name, api_type="cli", api_key="", model="",
+            command=host_spec.command, family=host_spec.family,
+        )
     agents = dict(BUILTIN_AGENT_TYPES)
     for path in toml_paths:                          # later paths override earlier
         data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
@@ -445,26 +485,31 @@ def _slice_from_table(name, t):
     )
 
 
-def _resolve_adversary(chain, providers, synthesizer_name):
+def _resolve_adversary(chain, providers, synthesizer_name, host=None):
     """Walk the configured chain; pick the first configured+available provider whose
-    family is not 'anthropic'. Skip chain entries naming no configured provider.
+    family differs from the actual synthesizer. Skip chain entries naming no configured provider.
     If none qualify, warn and fall back to the synthesizer provider name."""
+    synthesizer = providers.get(synthesizer_name)
+    host_spec = _host_spec(detect_host() if host is None else host)
+    synthesizer_family = (synthesizer.family if synthesizer is not None
+                          else host_spec.family if host_spec is not None else "anthropic")
     skipped = []
     for entry in chain:
         prov = providers.get(entry)
         if prov is None:
             skipped.append(entry)
             continue
-        if prov.family == "anthropic":
+        if prov.family == synthesizer_family:
             continue
         return entry, None
     reasons = []
     if skipped:
         reasons.append(f"chain entries not configured: {', '.join(skipped)}")
-    reasons.append("no configured non-anthropic provider available to act as adversary")
+    reasons.append(f"no configured provider outside synthesizer family '{synthesizer_family}' "
+                   "available to act as adversary")
     warning = (f"Adversary falls back to the synthesizer '{synthesizer_name}' "
                f"(same family as synthesis) — {'; '.join(reasons)}. "
-               f"Configure a non-anthropic provider for an independent adversary.")
+               "Configure a different-family provider for an independent adversary.")
     return synthesizer_name, warning
 
 
@@ -504,10 +549,11 @@ def load_run_config(toml_paths=None, env=None):
     # Adversary selection runs against configured + available providers.
     providers, _ = load_config(toml_paths, env)
     defaults = load_defaults(toml_paths)
-    synthesizer = pick_provider(providers, "synthesis", defaults) if providers else None
+    host = detect_host(env)
+    synthesizer = pick_provider(providers, "synthesis", defaults, host=host) if providers else None
     synthesizer_name = synthesizer.name if synthesizer is not None else "claude"
     adversary, adversary_warning = _resolve_adversary(
-        adversary_chain, providers, synthesizer_name)
+        adversary_chain, providers, synthesizer_name, host=host)
 
     return RunConfig(
         mode=mode,
