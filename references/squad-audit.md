@@ -261,8 +261,10 @@ python3 scripts/fetch_fulltext.py --run-dir research/[slug]
 python3 scripts/evidence_gate.py --run-dir research/[slug]   # must exit 0
 ```
 
-Cost: the panel + verifiers run on the session's own subagents ($0 on
-subscription). Only fills touch the Exa ledger: worst case $0.04 x 8 = $0.32.
+Cost: under Codex or Claude Code, the panel + verifiers can use native
+subscription-backed subagents at $0 API cost. Under the generic fallback, they may use
+a metered configured provider and must be charged accordingly. Only fills touch the Exa
+ledger: worst case $0.04 x 8 = $0.32.
 
 ## Stage G: Second round (optional, hard cap 2 rounds)
 

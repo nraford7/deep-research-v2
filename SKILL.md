@@ -37,7 +37,7 @@ Without it, retrieval scripts exit `20`.
 adapter's native subagents first. Metered providers below are used only when a
 script or subagent needs a direct API call:
 ```
-ANTHROPIC_API_KEY    # Claude (synthesis / integration default)
+ANTHROPIC_API_KEY    # Claude direct API provider
 OPENAI_API_KEY       # ChatGPT (gpt-4.1)
 GOOGLE_API_KEY       # Gemini 2.5 Pro
 XAI_API_KEY          # Grok (grok-3-latest)
@@ -49,7 +49,8 @@ CONTACT_EMAIL        # Optional — joins OpenAlex/Crossref "polite pool"
 `family` (`anthropic`, `openai`, `google`, `xai`) used for adversary selection (see
 [Provider family + adversary](#provider-family--adversary-selection)). Providers can
 also be defined in TOML for any OpenAI-compatible endpoint, or as a `cli` subscription
-provider at $0 (see [Provider/Agent Config](#provideragent-config-toml)).
+provider at $0 when the active host supplies that subscription (see
+[Provider/Agent Config](#provideragent-config-toml)).
 
 **Python packages:**
 ```bash
@@ -72,7 +73,7 @@ Round 2    SYNTHESIZE       compare the corpus; emit the six EXACT headers (4 fe
               ↓
 Round 2.5  DEEPEN           deepen_questions.py → root-cause / consequence / gap answers
               ↓
-Round 3    INTEGRATE        planners + parallel section subagents + dedup_bib
+Round 3    INTEGRATE        planners + slot-batched isolated section subagents + dedup_bib
               ↓
 Round 4    GATE + ADVERSARY verify_citations.py (+ ⚠ Unresolved links) → refute adversary
               ↓
@@ -312,9 +313,11 @@ Dispatch **one synthesis subagent** to read the entire Round-1 corpus (all
 `round1/slice_*.jsonl` + `brief_*.md` + the anchor) and produce a comparison. For any
 row with a `text_path`, **read that `round1/sources/<file>.txt` full-text file** and
 reason over the document itself — the highlights are only an index into it, not the
-evidence. Use the selected adapter's native synthesis subagent (subscription-backed
-under Codex or Claude Code) when available, else a configured provider bounded by
-`--max-cost-usd`.
+evidence. If `[defaults].synthesis` explicitly names an available provider, that
+configured provider is the actual synthesis executor and is bounded by
+`--max-cost-usd`. Only when that setting is absent, use the selected adapter's native
+synthesis subagent (subscription-backed under Codex or Claude Code when available).
+Record the actual executor and use its family for Round 4 adversary selection.
 
 **The synthesizer MUST emit these EXACT markdown headers** — `deepen_questions.py`
 parses them verbatim and a typo silently empties a bucket:
@@ -427,8 +430,10 @@ abstract connective prose before ever cutting a specific argument or example.
 
 **The unit of the report is the position, not the topic bucket.** The section planner
 creates **one section per major position / argument / school** the corpus supports, not
-an arbitrary set of topic headings. Dispatch section-planner subagents + a reconciler,
-then **one integration subagent per section** in parallel (each ≤ ~40k words of input).
+an arbitrary set of topic headings. Dispatch isolated section-planner subagents + a
+reconciler, then **one integration subagent per section** (each ≤ ~40k words of input).
+Run only up to available host slots at once and batch remaining isolated prompts without
+sharing contexts or changing section assignments.
 
 **Deep-explainer template — every integration subagent fills all four parts, in full
 prose, for its position:**
@@ -563,12 +568,13 @@ it is never lifted out unsupported.
 **Step 4.2 — refute-mode adversary (a DIFFERENT provider family).** Dispatch one
 adversary subagent whose job is to *refute* the draft — find unsupported claims, weak
 attributions, and figures the corpus does not support. It must run on a provider whose
-`family` differs from the synthesizer's (`anthropic`) so the critique is genuinely
-independent. Selection walks the configured `adversary` chain (default
-`grok → chatgpt → gemini`) and picks the first configured, available provider whose
-family ≠ `anthropic`; if none qualify it warns and falls back to the synthesizer (see
-[below](#provider-family--adversary-selection)). Feed the adversary the section files
-plus `round4/citation-verification.md`; write its report to `round4/factcheck.md`.
+`family` differs from the **actual synthesis executor's** family so the critique is
+genuinely independent. Selection walks the configured `adversary` chain (default
+`grok → chatgpt → gemini`) and picks the first configured, available different-family
+provider. If none qualify, independent review is fail-closed: surface the missing
+provider and stop before claiming independent review. A same-family critique may be
+kept only if it is explicitly labeled non-independent. Feed the adversary the section
+files plus `round4/citation-verification.md`; write its report to `round4/factcheck.md`.
 
 **Shard the adversary by section for long reports.** A single refute pass over a
 15–40k-word report is too shallow to spot-check every quote and attribution — the deep
@@ -578,7 +584,7 @@ over the whole document, each cross-checking ITS sections' quotes and attributio
 against the full-text store (`round1/sources/*.txt`) and writing a shard report
 (`round4/factcheck_<group>.md`, merged into `round4/factcheck.md`). **The
 different-provider-family rule holds per shard:** every shard still runs on a provider
-whose `family` ≠ `anthropic`. (This session, sharding into two adversaries caught a
+whose `family` differs from the actual synthesis executor. (This session, sharding into two adversaries caught a
 fabricated block quote with a fake-precise citation that a single whole-document pass
 skimmed past.)
 
@@ -635,10 +641,11 @@ Each Exa call is pre-charged at fee × retry-multiplier = **$0.02 × 2 = $0.04**
 | Round 2.5 deepening | up to 9 questions | $0.04 | ≈ $0.36 |
 | **Retrieval subtotal** | | | **≈ $0.56 (< $1 cap)** |
 
-Metered LLM legs (synthesis / integration / adversary, when not run on a $0
-subscription subagent) are covered separately by `--max-cost-usd` on those calls;
-`scripts/cost.py` estimates them. Exit `21` on any retrieval cap breach — surface it,
-raise the cap, and `--resume`; never silently retry.
+Metered LLM legs (synthesis / integration / adversary, including every generic fallback
+and any explicit configured executor) are covered separately by `--max-cost-usd` on
+those calls. Native Codex/Claude subscription subagents can be $0 API-cost where the
+selected host provides them; `scripts/cost.py` estimates metered calls. Exit `21` on any
+retrieval cap breach — surface it, raise the cap, and `--resume`; never silently retry.
 
 ## Model selection by role (Tier 1 hybrid — cost)
 
@@ -657,7 +664,7 @@ the session model.
 | Squad coverage audit (personas + checklist) | balanced/cheaper | Bounded gap-finding (≤5 gaps/lens); a checklist pass is mechanical |
 | Fix pass (apply adversary edits, Round 4) | balanced/cheaper | Mechanical corrections against a findings list |
 | Scope (Round 0), glue/orchestration | balanced/cheaper | Trivial classification / bookkeeping |
-| Refute adversary (Round 4) | **different family** | Must differ from the actual synthesizer's family; unchanged by this policy |
+| Refute adversary (Round 4) | **different family** | Must differ from the actual synthesis executor's family; unchanged by this policy |
 
 **How to apply it:** keep orchestration on the selected adapter's balanced/cheaper
 role, then elevate synthesis and integration to its strongest available role. State
@@ -691,12 +698,12 @@ Four built-in provider families:
 | `grok` (xAI) | `xai` |
 
 TOML providers set their own `family` (default `"other"`). **The adversary must differ
-in family from the actual synthesizer** so its refutation is independent.
+in family from the actual synthesis executor** so its refutation is independent.
 `config.load_run_config()` walks the configured `adversary` chain (default
 `["grok", "chatgpt", "gemini"]`), skips unavailable and same-family providers, and
 returns the first available different-family provider. If none qualify, independent
-review is fail-closed: surface the missing provider and stop before claiming it, or
-label any same-family critique as non-independent.
+review is fail-closed: surface the missing provider and stop before claiming it. A
+same-family critique may be retained only when explicitly labeled non-independent.
 
 ## Provider/Agent Config (TOML)
 
@@ -706,7 +713,9 @@ label any same-family critique as non-independent.
 - **`[run]` + `[slices.*]` tables** — the Round-1 slice roster, the retrieval cap
   (`max_retrieval_usd`), gate thresholds (`min_evidence_total`, `min_nonempty_slices`),
   and the `adversary` chain. Omit them to accept the code defaults.
-- **`[defaults]` table** — names providers for one-off calls (`utility` → Round-0 scoping).
+- **`[defaults]` table** — names providers for one-off calls (`utility` → Round-0
+  scoping) and, when explicitly set, the actual synthesis executor (`synthesis` →
+  Round 2). Without `synthesis`, Round 2 uses the selected adapter's native subagent.
 
 **Config discovery** (later overrides earlier): `~/.config/deeper-research/config.toml`,
 then `./deeper-research.toml`. `DEEPER_RESEARCH_CONFIG` (env) overrides the search path for
@@ -721,12 +730,14 @@ TOML paths are gitignored.
 
 ### CLI / subscription providers (`api_type = "cli"`)
 
-A provider can run a local CLI (`claude -p`, `codex exec`) authenticated via your SSO
-subscription (Claude Pro/Max, ChatGPT) — no per-token cost. `call_cli` scrubs
-`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` from the subprocess env so the CLI uses
-subscription auth. `codex-sub` uses `codex exec --ephemeral --sandbox read-only
---skip-git-repo-check -` for text-only direct calls; the prompt is sent on standard
-input. To let a `claude` cli provider search the live web:
+Host-native subscription CLI providers (`claude-sub`, `codex-sub`) can authenticate via
+the active Claude Pro/Max or ChatGPT subscription, with no per-token API charge.
+Configured generic CLI providers may be metered or use different credentials and must
+not be described as subscription-backed. `call_cli` scrubs `ANTHROPIC_API_KEY` /
+`OPENAI_API_KEY` from the subprocess env so host CLIs use their own auth. `codex-sub`
+uses `codex exec --ephemeral --sandbox read-only --skip-git-repo-check -` for text-only
+direct calls; the prompt is sent on standard input. To let a `claude` cli provider
+search the live web:
 
 ```toml
 [providers.claude-sub]
@@ -738,13 +749,13 @@ family       = "anthropic"
 ```
 
 `Bash(curl:*)` permits only curl — WebFetch is deliberately excluded (see the No-WebFetch
-rule). `--dangerously-skip-permissions` also enables live search but additionally
-enables Bash/Edit/Write in your cwd — avoid it for unattended subprocesses.
+rule). A full pipeline must use the contained-runner boundary and explicit allowed tools
+documented in the headless batch recipe; do not use broad permission bypasses.
 
 ## When to Use
 
 - User asks for deep research, comprehensive analysis, or an evidence-based report.
-- User says `/deeper-research [topic]`.
+- User says `$deeper-research [topic]` (Codex) or `/deeper-research [topic]` (Claude Code).
 - User needs a literature review, state-of-knowledge summary, or authoritative reference.
 - Any research task where accuracy, citation quality, and completeness outweigh speed.
 
@@ -760,15 +771,16 @@ so they do not interfere. Cap concurrency to available host slots and API/Exa li
 
 ```bash
 CONC=3                                   # never exceed available Codex slots
+mkdir -p research/_batch/logs
 while IFS= read -r q; do
   slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
-  dir="research/$slug"; mkdir -p "$dir"
+  dir="$(pwd)/research/$slug"; mkdir -p "$dir"
   [ -f "$dir/RESEARCH-BIBLE.md" ] && { echo "skip $slug"; continue; }   # resumable
   ( printf '%s\n' "Use the deeper-research skill to run the FULL pipeline for this question and \
 write RESEARCH-BIBLE.md into the run dir $dir. Use Codex native subagents; synthesis \
 and integration use the strongest available role, bounded roles use balanced/cheaper. \
 Headless: skip Stage-0 framing. QUESTION: $q" | \
-    codex exec --ephemeral --skip-git-repo-check - \
+    codex exec -C "$dir" --ephemeral --sandbox workspace-write --skip-git-repo-check - \
   ) > "research/_batch/logs/$slug.log" 2>&1 &
   while [ "$(jobs -rp | wc -l)" -ge "$CONC" ]; do sleep 5; done   # throttle
 done < questions.txt
@@ -779,11 +791,15 @@ wait
 
 ```bash
 CONC=3
+mkdir -p research/_batch/logs
+# Prerequisite: execute each invocation in a pre-approved contained runner whose
+# only writable mount is "$dir". `--allowedTools` selects capabilities; it does not
+# path-scope Write/Edit by itself.
 while IFS= read -r q; do
   slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
-  dir="research/$slug"; mkdir -p "$dir"
+  dir="$(pwd)/research/$slug"; mkdir -p "$dir"
   [ -f "$dir/RESEARCH-BIBLE.md" ] && continue
-  ( claude -p --dangerously-skip-permissions \
+  ( cd "$dir" && claude -p --allowedTools Read Edit Write WebSearch 'Bash(python3 scripts/*)' 'Bash(curl:*)' \
       "Use the deeper-research skill to run the FULL pipeline for this question and \
 write RESEARCH-BIBLE.md into $dir. Use Claude native Agent subagents and the \
 role-based model policy: strongest available for synthesis/integration, balanced for \
@@ -795,9 +811,10 @@ wait
 ```
 
 Notes that make either batch behave:
-- **Permissions:** grant a full-pipeline session only the access needed for its own
-  research directory. The `codex-sub` direct text-call form remains read-only; Claude
-  tool permissions stay least-privilege. (The No-WebFetch rule still holds.)
+- **Permissions:** Codex sets its run directory with `-C` and
+  `--sandbox workspace-write`; the `codex-sub` direct text-call form remains read-only.
+  Claude requires the documented pre-approved contained runner plus explicit allowed
+  tools; its allowed-tool list alone does not scope writes. (The No-WebFetch rule holds.)
 - **Concurrency:** batch rather than exceeding the host's available slots.
 - **Resumable:** skip any question whose run dir already has `RESEARCH-BIBLE.md`.
 - **Model:** state the role-based policy; do not hardcode Claude aliases in Codex runs.
@@ -831,12 +848,12 @@ python3 scripts/deepen_questions.py --run-dir "$RUN" --round2-file "$RUN/round2/
 # → Round 3 integration → sections/ → Round 4:
 python3 scripts/verify_citations.py "$RUN/sections/" --output "$RUN/round4/citation-verification.md" --check-urls
 python3 scripts/lint_background.py "$RUN/sections/"      # numeric tripwire inside fenced editorial blocks
-# → refute adversary (different from actual synthesizer family) → fix pass → export.
+# → refute adversary (different from actual synthesis executor family) → fix pass → export.
 ```
 
 ## Execution Checklist
 
-When `/deeper-research [topic]` is invoked:
+When `$deeper-research [topic]` (Codex) or `/deeper-research [topic]` (Claude Code) is invoked:
 
 0. **Runtime + Stage 0 framing** — read `references/runtime-adapters.md`, select one
    adapter, then unless the ask is already well-framed or the user passed a skip
@@ -865,11 +882,13 @@ When `/deeper-research [topic]` is invoked:
 6. **Round 2 synthesis** — one subagent; emit the six EXACT headers to `round2/synthesis.md`.
 7. **Round 2.5 deepening** — `deepen_questions.py --round2-file …`.
 8. **Round 3 integration** — read round1 briefs + `sources/*.txt` + `round2/synthesis.md`
-   + round2.5 answers; planners + parallel section subagents + `dedup_bib.py`; assemble + audit.
+   + round2.5 answers; planners + isolated section subagents + `dedup_bib.py`; run only
+   up to available host slots at once and batch remaining sections without sharing
+   contexts; assemble + audit.
 9. **Round 4** — `verify_citations.py --check-urls` (+ `classify_sources.py`,
    `lit_search.py --compare-bib`) → `lint_background.py research/[slug]/sections/`
-   (fix/re-fence flagged blocks) → refute adversary (different from actual synthesizer
-   family) → fix pass. Do not claim independent review if no such provider is available.
+   (fix/re-fence flagged blocks) → refute adversary (different from actual synthesis
+   executor family) → fix pass. Do not claim independent review if no such provider is available.
    Wrap the verifier in the stall watchdog: `python3 scripts/watched.py --stale-secs 300 -- python3 scripts/verify_citations.py …`.
 10. **Round 5 (optional)** — `slice_search --only-slice` / `deepen --single-question`; re-integrate.
 11. **Export** — `export.py`, then `search.py index`.
@@ -884,7 +903,7 @@ When `/deeper-research [topic]` is invoked:
 | Silent bucket loss in deepening | Round 2 MUST emit the six EXACT headers (a typo empties a bucket) |
 | Fabricated / unresolvable citations | `verify_citations.py` resolves every cite against OpenAlex/Crossref |
 | Dead or spoofed links | Three-state SSRF-hardened probe → `## ⚠ Unresolved links` |
-| Echo-chamber review | Adversary forced onto a family different from the actual synthesizer |
+| Echo-chamber review | Adversary forced onto a family different from the actual synthesis executor |
 | Bibliography skewed to blogs/wikis | `classify_sources.py` quality score |
 | Major canonical works missing | `lit_search.py --compare-bib` |
 | Partial retrieval failure | `slice_search.py --resume` skips slices whose jsonl parses |

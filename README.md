@@ -12,7 +12,7 @@ Round 1    Exa retrieval slices + a free OpenAlex/Semantic Scholar academic anch
              → evidence gate: MUST pass before any synthesis (thin corpus is refused)
 Round 2    Synthesis over the fetched corpus — six exact question-bucket headers
 Round 2.5  Question-driven deepening — root-cause / consequence / gap (Exa deep-reasoning)
-Round 3    Section planners + reconciler → parallel integration agents + dedup bibliography
+Round 3    Section planners + reconciler → slot-batched isolated integration agents + dedup bibliography
 Round 4    Mechanical citation verification (Crossref/OpenAlex) + three-state SSRF-hardened
              link probe + a refute-mode adversary on a different provider family + fix pass
 Round 5    (optional) Targeted rerun of a single slice or question, then re-integrate
@@ -68,7 +68,7 @@ See `SKILL.md` for the full architecture, prompt templates, and failure modes.
 - **Confidence tagging** — high-stakes claims carry `[confidence: high/medium/low]`
 - **Mechanical citation verification** — resolves every `[Author, Year]` against OpenAlex and Crossref (free, no key)
 - **Three-state SSRF-hardened link probe** — `--check-urls` reports unresolved / indeterminate-with-reason / truncated, never a naive dead-URL binary
-- **Different-family adversary** — a refute-mode pass forced onto a provider family that differs from the synthesizer's
+- **Different-family adversary** — a refute-mode pass forced onto a provider family that differs from the actual synthesis executor's
 - **Source tier audit** — scores bibliography quality (peer-reviewed vs blog vs wiki)
 - **Missing-literature check** — compares against OpenAlex top-N to flag canonical works absent from the bibliography
 - **BibTeX + JSONL export** — machine-readable downstream consumption
@@ -96,7 +96,11 @@ pip install -r /Users/noahraford/Projects/deeper-research/requirements-search.tx
 # needs OPENAI_API_KEY; without this step search just skips gracefully
 ```
 
-Retrieval needs `EXA_API_KEY`. The skill auto-detects configured LLM providers; a missing LLM key narrows direct-call options. Under Codex or Claude Code, synthesis and integration prefer that host's native subscription-backed subagents.
+Retrieval needs `EXA_API_KEY`. The skill auto-detects subscription providers only when
+the matching active-host marker and CLI are both present; a missing LLM key narrows
+direct-call options. Unless `[defaults].synthesis` explicitly selects a configured
+executor, Codex or Claude Code uses that host's native subscription-backed subagent for
+synthesis and integration.
 
 ## Use
 
@@ -194,7 +198,7 @@ python3 scripts/search.py "central bank digital currency risks"
 python3 scripts/search.py "CBDC risks" --topic cbdc    # scope to one topic
 ```
 
-Re-running `/deeper-research` on the same topic updates that topic's entries in
+Re-running `$deeper-research` (Codex) or `/deeper-research` (Claude Code) on the same topic updates that topic's entries in
 place; a new sub-topic just joins the index. Both are incremental — only changed
 sections re-embed. If the deps or `OPENAI_API_KEY` are missing, indexing/search
 print a one-line notice and exit 0 — core research is unaffected.
@@ -210,12 +214,13 @@ whole pipeline on one model (the **Tier 1 hybrid**):
 | Synthesis (Round 2) | strongest available — sets the field-map frame; a single call |
 | Integration sections (Round 3) | strongest available — the prose you read, and the biggest token sink |
 | Squad audit, fix-pass, scoping, glue | balanced/cheaper |
-| Refute adversary (Round 4) | family different from the actual synthesizer |
+| Refute adversary (Round 4) | family different from the actual synthesis executor |
 
 Use the active runtime's balanced/cheaper role for orchestration and elevate synthesis +
-integration to its strongest available role. Codex and Claude aliases remain
-host-specific; the shared policy never assumes one vendor's names. Full table and the
-headless note: *Model selection by role* in `SKILL.md`.
+integration to its strongest available role. An explicit `[defaults].synthesis` instead
+selects the configured Round-2 executor; its family governs the adversary. Codex and
+Claude aliases remain host-specific; the shared policy never assumes one vendor's names.
+Full table and the headless note: *Model selection by role* in `SKILL.md`.
 
 ## Batch: parallel headless runs over many questions
 
@@ -228,14 +233,15 @@ Codex batch recipe:
 
 ```bash
 CONC=3                                   # never exceed available Codex slots
+mkdir -p research/_batch/logs
 while IFS= read -r q; do
   slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
-  dir="research/$slug"; mkdir -p "$dir"
+  dir="$(pwd)/research/$slug"; mkdir -p "$dir"
   [ -f "$dir/RESEARCH-BIBLE.md" ] && continue                    # resumable: skip done
   ( printf '%s\n' "Use the deeper-research skill: run the FULL pipeline for this question, write \
 RESEARCH-BIBLE.md into $dir. Use Codex native subagents and role-based model choices. \
 Headless: skip Stage-0 framing. QUESTION: $q" | \
-    codex exec --ephemeral --skip-git-repo-check - \
+    codex exec -C "$dir" --ephemeral --sandbox workspace-write --skip-git-repo-check - \
   ) > "research/_batch/logs/$slug.log" 2>&1 &
   while [ "$(jobs -rp | wc -l)" -ge "$CONC" ]; do sleep 5; done  # throttle
 done < questions.txt
@@ -246,11 +252,15 @@ Claude batch recipe:
 
 ```bash
 CONC=3
+mkdir -p research/_batch/logs
+# Prerequisite: execute each invocation in a pre-approved contained runner whose
+# only writable mount is "$dir". `--allowedTools` selects capabilities; it does not
+# path-scope Write/Edit by itself.
 while IFS= read -r q; do
   slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
-  dir="research/$slug"; mkdir -p "$dir"
+  dir="$(pwd)/research/$slug"; mkdir -p "$dir"
   [ -f "$dir/RESEARCH-BIBLE.md" ] && continue
-  ( claude -p --dangerously-skip-permissions \
+  ( cd "$dir" && claude -p --allowedTools Read Edit Write WebSearch 'Bash(python3 scripts/*)' 'Bash(curl:*)' \
       "Use the deeper-research skill: run the FULL pipeline for this question, write \
 RESEARCH-BIBLE.md into $dir. Use Claude native Agent subagents and role-based model \
 choices. Headless: skip Stage-0 framing. QUESTION: $q" \
@@ -260,11 +270,12 @@ done < questions.txt
 wait
 ```
 
-Grant each full-pipeline session only the access needed for its own research directory
-(the No-WebFetch rule still holds). Batch rather than exceeding available slots; skip
-run directories that already contain a Bible. Cost scales linearly (~$0.5–0.8 Exa per
-question plus LLM legs). Full notes: *Batch: parallel headless runs over many questions*
-in `SKILL.md`.
+Codex sets its run directory with `-C` and `--sandbox workspace-write`. Claude requires the
+documented pre-approved contained runner plus explicit allowed tools; its allowed-tool
+list alone does not scope writes. (The No-WebFetch rule holds.) Batch rather than
+exceeding available slots; skip run directories that already contain a Bible. Cost scales
+linearly (~$0.5–0.8 Exa per question plus LLM legs). Full notes: *Batch: parallel
+headless runs over many questions* in `SKILL.md`.
 
 ## API keys
 
@@ -282,9 +293,27 @@ The dispatcher reads from `~/.env` and `./.env` automatically. Or export them in
 
 Providers can also be defined in TOML for arbitrary OpenAI-compatible endpoints (`api_type = "openai"` with a `base_url`) — DeepSeek direct, OpenRouter, Fireworks, xAI, and similar services all work this way. Copy `config.toml.example` to `./deeper-research.toml` or `~/.config/deeper-research/config.toml` and fill in inline keys. TOML config augments env keys — built-in providers still activate from env vars. Both TOML paths are gitignored.
 
-`config.py` is the single control point for provider resolution in the shipped scripts (Round 0 + Round 1). The optional `[defaults]` TOML table lets you name a provider for one-off calls: `[defaults].utility` controls which provider `scope.py --use-llm` uses for Round 0 scoping — including a subscription provider at $0 per call — instead of a hardcoded API key.
+`config.py` is the single control point for provider resolution in the shipped scripts
+(Round 0 + Round 1). The optional `[defaults]` TOML table lets you name a provider for
+one-off calls: `[defaults].utility` controls which provider `scope.py --use-llm` uses
+for Round 0 scoping. An explicit `[defaults].synthesis` selects the provider that
+actually runs Round 2; when absent, the active host's native subagent is used. The
+actual synthesis executor's family governs adversary selection.
 
-Providers can also be local CLI tools (`api_type = "cli"`) — `codex-sub` and `claude-sub` are auto-detected when the matching host CLI is installed, and explicit TOML entries may override either. `codex-sub` uses a text-only `codex exec` call with `--ephemeral`, `--sandbox read-only`, and `--skip-git-repo-check`; Claude uses `claude -p` with least-privilege tools. To enable live web search on a Claude CLI provider, set `extra_args = ["--allowedTools", "WebSearch", "Bash(curl:*)"]` (search + curl-only fetching; no Edit/Write, no other shell commands — WebFetch is banned pipeline-wide because it returns an AI summary of the page rather than raw text) and add `capabilities = ["web_search"]`. `--dangerously-skip-permissions` also enables Bash/Edit/Write; avoid it for unattended subprocesses. See `config.toml.example` for the full syntax and host-specific examples.
+Providers can also be local CLI tools (`api_type = "cli"`) — `codex-sub` and
+`claude-sub` are auto-detected only when their active-host marker and matching CLI are
+present, and explicit TOML entries may override either. Those host-native providers can
+use the corresponding subscription; generic configured CLIs may be metered or use other
+credentials and must not be described as subscription-backed. `codex-sub` uses a
+text-only `codex exec` call with `--ephemeral`, `--sandbox read-only`, and
+`--skip-git-repo-check`; Claude uses `claude -p` with explicit least-privilege allowed
+tools. To enable live web search on a Claude CLI provider, set
+`extra_args = ["--allowedTools", "WebSearch", "Bash(curl:*)"]` (search + curl-only
+fetching; no Edit/Write, no other shell commands — WebFetch is banned pipeline-wide
+because it returns an AI summary of the page rather than raw text) and add
+`capabilities = ["web_search"]`. Full pipeline writes require the contained-runner
+boundary described in the batch recipe. See `config.toml.example` for the full syntax
+and host-specific examples.
 
 > **OpenRouter vs direct APIs:** OpenRouter's value is reaching model lineages you can't get direct (Kimi, GLM, Microsoft, etc.). For models available direct (DeepSeek, Anthropic), the provider's own API is cheaper. All are `api_type = "openai"` providers with a `base_url`.
 
@@ -296,7 +325,7 @@ Providers can also be local CLI tools (`api_type = "cli"`) — `codex-sub` and `
 
 | Script | Purpose |
 |---|---|
-| `scripts/scope.py` | Domain classification + source priority recommendations (rule-based + optional Claude) |
+| `scripts/scope.py` | Domain classification + source priority recommendations (rule-based + optional configured LLM) |
 | `scripts/slice_search.py` | Round-1 retrieval: Exa search slices + a free academic anchor; ledger-capped; writes jsonl briefs + manifest |
 | `scripts/evidence_gate.py` | Refuse synthesis over a thin corpus — exit 0 if thick enough and every row re-validates, else exit 22 |
 | `scripts/citation_chase.py` | Post-gate one-hop citation-graph fill: backward co-citation + a small forward citing-works pass, deduped against the corpus, written to `slice_citation.jsonl`, then re-gated. Fail-closed: exit 0 = ran (expanded or nothing new), nonzero (40 OpenAlex unreachable, 41 no resolvable seeds, 22 still thin) = could not complete, do not proceed as if expansion succeeded |

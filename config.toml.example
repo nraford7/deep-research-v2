@@ -24,7 +24,7 @@ model      = "deepseek-v4-pro"             # also deepseek-v4-flash (cheaper); l
 max_tokens = 32768
 pricing    = { in = 0.55, out = 2.19 }
 family     = "other"                        # model lineage; drives adversary selection
-                                            # (must differ from the actual synthesizer)
+                                            # (must differ from the actual synthesis executor)
 
 # OpenRouter — best for reaching model lineages you can't get direct
 # (Kimi/GLM/Microsoft etc). Not the cheapest path for DeepSeek or Anthropic.
@@ -47,8 +47,9 @@ family     = "other"
 
 # Subscription providers are auto-detected when the matching host CLI is available:
 # Codex adds `codex-sub`; Claude Code adds `claude-sub`. The declarations below are
-# optional overrides (for example, to add model/tool settings). Do not set a
-# `[defaults]` provider unless you deliberately want to override host preference.
+# optional overrides (for example, to add model/tool settings). An explicit
+# `[defaults].synthesis` deliberately selects the provider that actually runs Round 2;
+# omit it to use the active host's native subagent.
 
 # Codex subscription provider — direct text calls use hardened `codex exec` with an
 # ephemeral, read-only sandbox. Native Codex subagents handle orchestration.
@@ -63,8 +64,6 @@ family   = "openai"
 # NO WebFetch: it returns an AI summary of the page, not the page — curl the raw
 # page and grep/read the actual text instead. This makes it eligible for the
 # real-time agent type via capabilities = ["web_search"].
-# --dangerously-skip-permissions ALSO enables live web search but additionally
-# enables full Bash/Edit/Write — avoid for an unattended subprocess in your cwd.
 [providers.claude-sub]
 api_type     = "cli"
 command      = "claude"
@@ -74,11 +73,12 @@ capabilities = ["web_search"]                     # marks it real-time-eligible
 family       = "anthropic"                         # same lineage as the metered `claude` built-in;
                                                     # same-family adversaries are skipped
 
-# One-off calls (Round 0 scoping, future synthesis) — active-host subscription
-# preference applies automatically. Uncomment only to make an explicit override.
+# One-off calls — active-host subscription preference applies automatically for utility
+# work. Uncommenting `synthesis` changes Round 2: it becomes the actual executor, and
+# adversary selection compares against that provider's family.
 # [defaults]
 # utility = "codex-sub"    # or "claude-sub"; explicit defaults win over auto-detection
-# synthesis = "codex-sub"
+# synthesis = "codex-sub"  # explicit executor; omit to use native host synthesis
 
 # ---------------------------------------------------------------------------
 # Run configuration (Round-1 retrieval + adversary). All keys optional — omit
@@ -91,7 +91,7 @@ family       = "anthropic"                         # same lineage as the metered
 # min_nonempty_slices = 2          # gate: minimum slices that returned ≥1 item
 # adversary           = ["grok", "chatgpt", "gemini"]  # walked in order; the first
 #                                  # configured + available provider whose family differs
-#                                  # from the ACTUAL synthesizer becomes the adversary. If
+#                                  # from the ACTUAL synthesis executor becomes the adversary. If
 #                                  # none qualify, independent review is fail-closed: do
 #                                  # not report it as satisfied; configure a different-family provider.
 
