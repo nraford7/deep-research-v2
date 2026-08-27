@@ -280,14 +280,26 @@ def build_request_body(bucket, question):
 
 
 def _extract_answer(payload):
-    """Pull the answer text out of a deep-reasoning response. Exa may return the
-    structured object under ``answer`` (per outputSchema) or a raw string."""
-    if isinstance(payload, dict):
-        ans = payload.get("answer")
-        if isinstance(ans, str):
-            return ans
-        if isinstance(ans, dict) and isinstance(ans.get("answer"), str):
-            return ans["answer"]
+    """Pull the answer text out of a deep-reasoning response.
+
+    Current Exa shape: the synthesized payload lives at ``output.content`` —
+    an object matching outputSchema (here ``{"answer": str}``) or a plain
+    string for text schemas — with ``output.grounding`` carrying citations.
+    Older deep responses surfaced a top-level ``answer``; kept as a fallback."""
+    if not isinstance(payload, dict):
+        return ""
+    output = payload.get("output")
+    if isinstance(output, dict):
+        content = output.get("content")
+        if isinstance(content, dict) and isinstance(content.get("answer"), str):
+            return content["answer"]
+        if isinstance(content, str):
+            return content
+    ans = payload.get("answer")
+    if isinstance(ans, str):
+        return ans
+    if isinstance(ans, dict) and isinstance(ans.get("answer"), str):
+        return ans["answer"]
     return ""
 
 

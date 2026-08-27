@@ -59,9 +59,10 @@ class FakeSession:
 
 
 def _answer_body(answer="an answer", cost_total=None, urls=None, highlights=None):
-    """A deep-reasoning response body. Exa returns the structured answer plus
-    result records carrying urls/highlights we turn into a Sources block."""
-    body = {"answer": answer}
+    """A deep-reasoning response body. Current Exa shape: the structured
+    answer lives at output.content, plus result records carrying
+    urls/highlights we turn into a Sources block."""
+    body = {"output": {"content": {"answer": answer}, "grounding": []}}
     results = []
     for u in (urls or []):
         results.append({"url": u, "title": "T", "highlights": highlights or []})
