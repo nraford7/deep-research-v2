@@ -73,6 +73,16 @@ def test_explicit_toml_provider_overrides_implicit_subscription_provider(tmp_pat
     assert providers["codex-sub"].command == "sh"
     assert providers["codex-sub"].family == "custom"
 
+
+def test_unavailable_explicit_provider_removes_implicit_subscription_provider(tmp_path, monkeypatch):
+    p = tmp_path / "deeper-research.toml"
+    p.write_text('[providers.codex-sub]\napi_type="cli"\ncommand="unavailable-codex"\n')
+    monkeypatch.setattr(
+        config.shutil, "which", lambda command: "/bin/codex" if command == "codex" else None)
+    providers, _ = config.load_config([p], {"CODEX_SESSION_ID": "c"})
+    assert "codex-sub" not in providers
+
+
 def test_load_config_toml_inline_and_env_ref(tmp_path):
     p = tmp_path / "deeper-research.toml"
     p.write_text(textwrap.dedent('''

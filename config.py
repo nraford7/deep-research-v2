@@ -408,6 +408,8 @@ def load_config(toml_paths, env):
             p = _provider_from_table(name, t, env)
             if p is not None:
                 providers[name] = p
+            else:
+                providers.pop(name, None)  # explicit unavailable entries override implicit providers
         for name, t in (data.get("agents") or {}).items():
             base = agents.get(name)
             agents[name] = AgentType(
@@ -442,7 +444,7 @@ class RunConfig:
     slices: dict[str, SliceSpec]
     adversary_chain: list[str]          # as configured; walked for selection
     adversary: str                      # resolved adversary provider name
-    synthesizer: str                    # anthropic synthesis provider name
+    synthesizer: str                    # resolved synthesis provider name
     adversary_warning: str | None
 
 
