@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""deep-research — semantic search over your research (native wrapper).
+"""deeper-research — semantic search over your research (native wrapper).
 
-Bundles the vendored semantic-search engine and bakes in deep-research
+Bundles the vendored semantic-search engine and bakes in deeper-research
 conventions: ONE project-wide index over each topic's Bible
 (README.md + sections/*.md) at research/.semantic-index.db.
 
@@ -64,7 +64,7 @@ def _load_engine():
 
 
 def _resolve_key() -> bool:
-    """Populate os.environ['OPENAI_API_KEY'] using deep-research's own loader
+    """Populate os.environ['OPENAI_API_KEY'] using deeper-research's own loader
     (env -> ~/.env -> ./.env, first-set-wins). Returns True if a key is available."""
     if os.environ.get("OPENAI_API_KEY"):
         return True
@@ -145,7 +145,7 @@ def run(argv) -> int:
 
         qp = _QuietParser(
             prog="scripts/search.py",
-            description="Semantic search over your deep-research output.",
+            description="Semantic search over your deeper-research output.",
         )
         qp.add_argument("query", nargs="?", default=None, help="natural-language query")
         qp.add_argument("--topic", default=None, help="scope search to one topic slug")

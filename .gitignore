@@ -33,8 +33,8 @@ retrieval_ledger.json
 # roborev snapshots
 /.roborev/
 
-# Deep Research config — holds inline API keys
-deep-research.toml
+# Deeper Research config — holds inline API keys
+deeper-research.toml
 **/config.toml
 
 # Local rollback substrate — never publish (holds a copy of the live config)

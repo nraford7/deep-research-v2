@@ -1,7 +1,7 @@
 # Dialogic Goal Elicitation and Clarification
 ## How skilled practitioners help people discover, reframe, and decompose what they actually want
 
-*A research reference document ("Research Bible") produced by the deep-research pipeline.*
+*A research reference document ("Research Bible") produced by the deeper-research pipeline.*
 *Compiled 2026-08-25. Retrieval corpus: 394 sources across 27 slices; evidence gate passed; every empirical claim carries source attribution; draft passed a numeric background lint and an independent (OpenAI-family) refute-mode adversary followed by a per-finding fix pass.*
 
 **Purpose.** This document informs the design of a dialogic AI skill that helps a

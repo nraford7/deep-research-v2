@@ -226,11 +226,11 @@ def test_adversary_empty_chain_falls_back_to_default(tmp_path):
     assert rc.adversary == "grok"
 
 
-def test_deep_research_config_env_override(tmp_path):
+def test_deeper_research_config_env_override(tmp_path):
     p = tmp_path / "override.toml"
     p.write_text('[run]\nmax_retrieval_usd = 7.0\n')
     env = dict(_all_keys())
-    env["DEEP_RESEARCH_CONFIG"] = str(p)
+    env["DEEPER_RESEARCH_CONFIG"] = str(p)
     # toml_paths deliberately empty; env override must supply the source
     rc = config.load_run_config(toml_paths=[], env=env)
     assert rc.max_retrieval_usd == 7.0

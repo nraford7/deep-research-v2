@@ -1,6 +1,6 @@
 # Example run: Dialogic goal elicitation and clarification
 
-A complete deep-research output, kept as a reference example of what the
+A complete deeper-research output, kept as a reference example of what the
 pipeline produces. Topic: how skilled practitioners help people discover,
 reframe, and decompose what they actually want (input to designing a
 dialogic goal-clarification AI skill).

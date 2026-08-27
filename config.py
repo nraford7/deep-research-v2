@@ -1,4 +1,4 @@
-"""Authoritative data model and built-in registry for the deep-research dispatcher.
+"""Authoritative data model and built-in registry for the deeper-research dispatcher.
 
 Defines the ``Provider`` and ``AgentType`` dataclasses, built-in provider spec
 templates, built-in agent types, the default provider↔agent pairing, and default
@@ -265,7 +265,7 @@ def resolve_assignments(agents, providers, seed=0, prior_assignments=None):
 
 def default_toml_paths():
     """Return the list of existing TOML config paths in standard locations."""
-    candidates = [Path.home() / ".config" / "deep-research" / "config.toml", Path("deep-research.toml")]
+    candidates = [Path.home() / ".config" / "deeper-research" / "config.toml", Path("deeper-research.toml")]
     return [p for p in candidates if p.exists()]
 
 
@@ -471,10 +471,10 @@ def _resolve_adversary(chain, providers, synthesizer_name):
 def load_run_config(toml_paths=None, env=None):
     """Load the [run] + [slices.*] tables into a RunConfig.
 
-    Mirrors load_config's injectable signature. Honors DEEP_RESEARCH_CONFIG (in env)
+    Mirrors load_config's injectable signature. Honors DEEPER_RESEARCH_CONFIG (in env)
     as a TOML source override. Absent [run] ⇒ all defaults; invalid mode ⇒ ValueError."""
     env = dict(os.environ if env is None else env)
-    override = env.get("DEEP_RESEARCH_CONFIG")
+    override = env.get("DEEPER_RESEARCH_CONFIG")
     if override:
         toml_paths = [Path(override)]
     elif toml_paths is None:

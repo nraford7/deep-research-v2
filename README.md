@@ -1,4 +1,4 @@
-# deep-research
+# deeper-research
 
 Retrieval-first deep research — a real evidence corpus fetched with Exa search slices, a hard evidence gate that refuses to synthesize over thin material, question-driven deepening, mechanical citation verification, and a different-provider adversary. A Claude Code skill that scopes the domain, retrieves a fetched corpus (Exa slices + a free academic anchor), synthesizes over that evidence, chases root-cause / consequence / gap questions, integrates by topic section, verifies every citation against OpenAlex/Crossref, and lets an independent adversary try to refute the draft. Produces a fact-checked, fully-cited "Research Bible" plus BibTeX and a machine-readable claims file.
 
@@ -42,17 +42,17 @@ Output     Hub-and-spoke Research Bible + BibTeX + claims.jsonl + provenance
 
 ```bash
 # 1. Clone into your Claude skills directory
-git clone https://github.com/nraford7/deep-research-v2.git ~/.claude/skills/deep-research
+git clone https://github.com/nraford7/deeper-research.git ~/.claude/skills/deeper-research
 
 # 2. Install Python deps
-pip install -r ~/.claude/skills/deep-research/requirements.txt
+pip install -r ~/.claude/skills/deeper-research/requirements.txt
 
 # 3. Set whichever API keys you have
-cp ~/.claude/skills/deep-research/.env.example ~/.env
+cp ~/.claude/skills/deeper-research/.env.example ~/.env
 # edit ~/.env and fill in keys
 
 # 4. (Optional) Enable bundled semantic search over your research
-pip install -r ~/.claude/skills/deep-research/requirements-search.txt
+pip install -r ~/.claude/skills/deeper-research/requirements-search.txt
 # needs OPENAI_API_KEY; without this step search just skips gracefully
 ```
 
@@ -63,7 +63,7 @@ Retrieval needs `EXA_API_KEY`. The skill auto-detects which LLM keys are set and
 In Claude Code:
 
 ```
-/deep-research [your topic and scope]
+/deeper-research [your topic and scope]
 ```
 
 The skill walks the agent through every round. Or invoke the dispatcher and helper scripts directly (retrieval-first — Round 1 fetches the corpus, the gate must pass before synthesis):
@@ -145,7 +145,7 @@ python3 scripts/search.py "central bank digital currency risks"
 python3 scripts/search.py "CBDC risks" --topic cbdc    # scope to one topic
 ```
 
-Re-running `/deep-research` on the same topic updates that topic's entries in
+Re-running `/deeper-research` on the same topic updates that topic's entries in
 place; a new sub-topic just joins the index. Both are incremental — only changed
 sections re-embed. If the deps or `OPENAI_API_KEY` are missing, indexing/search
 print a one-line notice and exit 0 — core research is unaffected.
@@ -164,7 +164,7 @@ print a one-line notice and exit 0 — core research is unaffected.
 
 The dispatcher reads from `~/.env` and `./.env` automatically. Or export them in your shell.
 
-Providers can also be defined in TOML for arbitrary OpenAI-compatible endpoints (`api_type = "openai"` with a `base_url`) — DeepSeek direct, OpenRouter, Fireworks, xAI, and similar services all work this way. Copy `config.toml.example` to `./deep-research.toml` or `~/.config/deep-research/config.toml` and fill in inline keys. TOML config augments env keys — built-in providers still activate from env vars. Both TOML paths are gitignored.
+Providers can also be defined in TOML for arbitrary OpenAI-compatible endpoints (`api_type = "openai"` with a `base_url`) — DeepSeek direct, OpenRouter, Fireworks, xAI, and similar services all work this way. Copy `config.toml.example` to `./deeper-research.toml` or `~/.config/deeper-research/config.toml` and fill in inline keys. TOML config augments env keys — built-in providers still activate from env vars. Both TOML paths are gitignored.
 
 `config.py` is the single control point for provider resolution in the shipped scripts (Round 0 + Round 1). The optional `[defaults]` TOML table lets you name a provider for one-off calls: `[defaults].utility` controls which provider `scope.py --use-llm` uses for Round 0 scoping — including a subscription provider at $0 per call — instead of a hardcoded API key.
 

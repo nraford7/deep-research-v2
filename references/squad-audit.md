@@ -1,6 +1,6 @@
 # Step 1.5 — Coverage audit ("the squad")
 
-> Bundled procedure of the deep-research skill. This IS Step 1.5 — deep-research runs it inline, dispatching the persona subagents itself via the Agent tool; it is **not** a separate skill and is never run standalone. Persona files live in `references/squad-personas/`. Runs automatically after citation-chase and the gate pass.
+> Bundled procedure of the deeper-research skill. This IS Step 1.5 — deeper-research runs it inline, dispatching the persona subagents itself via the Agent tool; it is **not** a separate skill and is never run standalone. Persona files live in `references/squad-personas/`. Runs automatically after citation-chase and the gate pass.
 
 A viewpoint-diverse coverage audit. The stock `coverage_audit.py` asks ONE model
 "what is missing?", so the gap list inherits that one model's blind spots. This
@@ -8,7 +8,7 @@ skill keeps that model's ONE genuine strength — a dutiful walk of every techni
 the scope names — as a cheap mechanical first pass (Stage A.5), then adds four
 isolated reader personas for the depth gaps a checklist can't see, and an
 adversarial per-gap verifier so no false gap burns budget. It reuses
-deep-research's own ledger-charged fill machinery unchanged.
+deeper-research's own ledger-charged fill machinery unchanged.
 
 **Why both a checklist AND a panel.** Head-to-head on the goal-elicitation corpus
 (2026-08-26), the stock single-model pass BEAT the persona panel on plain
@@ -22,13 +22,13 @@ mechanical breadth, the panel is judgment-laden depth. This skill runs both.
 
 **Recipe** (agent-studio): Artifact/skill review row. Vary by review dimension,
 4 generators + 1 verifier, parallel isolated, combine = dedup + severity-rank.
-This REPLACES Step 1.5 of the deep-research pipeline; do not also run
+This REPLACES Step 1.5 of the deeper-research pipeline; do not also run
 `coverage_audit.py` in the same round. Everything downstream (Round 2 onward)
 is unchanged.
 
 ## Preconditions (hard)
 
-1. A deep-research run dir exists (`research/[slug]/`) with `round1/` populated.
+1. A deeper-research run dir exists (`research/[slug]/`) with `round1/` populated.
 2. `evidence_gate.py` has exited `0`. Never audit a corpus the gate rejects.
 3. `citation_chase.py` has returned `0` (run the squad after the graph fill, as
    Step 1.5 normally runs, so personas see the enlarged corpus).
@@ -236,7 +236,7 @@ Write both, before any Exa spend:
    lines and dissent line, the merge table (checklist + persona gaps, dedup
    noted), every REFUTED gap with its refutation, every capped-out depth gap.
 
-## Stage F: Fill (reuse deep-research's machinery, unchanged)
+## Stage F: Fill (reuse deeper-research's machinery, unchanged)
 
 For each confirmed gap, in order of rank:
 

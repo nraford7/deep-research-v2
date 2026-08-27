@@ -188,7 +188,7 @@ def _probe_session(original_host: str, pinned_ip: str) -> requests.Session:
     NOTE: TLS verification stays ON — it is never disabled."""
     s = requests.Session()
     s.trust_env = False  # ignore HTTP(S)_PROXY / NO_PROXY — a proxy bypasses the IP pin
-    s.headers.update({"User-Agent": f"deep-research/2.0 (mailto:{CONTACT})"})
+    s.headers.update({"User-Agent": f"deeper-research/2.0 (mailto:{CONTACT})"})
     s.mount("https://", _PinnedHTTPSAdapter(original_host))
     # For http:// there is no TLS to verify; the IP pin (host rewritten below)
     # plus the original Host header are what matter.
@@ -391,7 +391,7 @@ def first_surname(author_field: str) -> str:
 
 def session():
     s = requests.Session()
-    s.headers.update({"User-Agent": f"deep-research/1.0 (mailto:{CONTACT})"})
+    s.headers.update({"User-Agent": f"deeper-research/1.0 (mailto:{CONTACT})"})
     retry = CappedRetry(
         total=4,
         backoff_factor=0.8,

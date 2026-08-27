@@ -40,7 +40,7 @@ def test_load_config_no_toml_uses_builtins_from_env():
     assert set(agents) == set(config.BUILTIN_AGENT_TYPES)          # all agent types always present
 
 def test_load_config_toml_inline_and_env_ref(tmp_path):
-    p = tmp_path / "deep-research.toml"
+    p = tmp_path / "deeper-research.toml"
     p.write_text(textwrap.dedent('''
         [providers.deepseek]
         api_type = "openai"
@@ -290,9 +290,9 @@ def test_pick_provider_none_when_no_providers():
 def test_default_toml_paths_returns_only_existing(tmp_path, monkeypatch):
     # project-local present, global absent
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "deep-research.toml").write_text('[defaults]\nutility="x"\n')
+    (tmp_path / "deeper-research.toml").write_text('[defaults]\nutility="x"\n')
     monkeypatch.setattr(config.Path, "home", staticmethod(lambda: tmp_path / "nohome"))
     paths = config.default_toml_paths()
-    # default_toml_paths returns relative Path("deep-research.toml") for the local candidate
-    assert any(p.resolve() == (tmp_path / "deep-research.toml").resolve() for p in paths)
+    # default_toml_paths returns relative Path("deeper-research.toml") for the local candidate
+    assert any(p.resolve() == (tmp_path / "deeper-research.toml").resolve() for p in paths)
     assert all(p.exists() for p in paths)

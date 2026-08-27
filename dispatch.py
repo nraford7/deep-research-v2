@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Deep Research Dispatcher — thin slices entry point.
+Deeper Research Dispatcher — thin slices entry point.
 
 This is a slices-only orchestrator guide, not a runner. It validates the run mode,
 preflights the Exa retrieval key (`EXA_API_KEY`), and prints the ordered Round-1
@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Deep Research Dispatcher — slices-only Round-1 command guide",
+        description="Deeper Research Dispatcher — slices-only Round-1 command guide",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--topic", required=True, help="Research topic")

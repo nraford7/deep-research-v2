@@ -1,5 +1,5 @@
-# Deep Research — provider/agent config example. Copy this to ./deep-research.toml or
-# ~/.config/deep-research/config.toml and fill in your keys. The COPY holds secrets and
+# Deeper Research — provider/agent config example. Copy this to ./deeper-research.toml or
+# ~/.config/deeper-research/config.toml and fill in your keys. The COPY holds secrets and
 # is gitignored; do NOT put real keys in this example file.
 # Augments ~/.env: built-in providers (claude/chatgpt/gemini/grok) still work
 # from env keys; entries here add or override providers and remap agent types.

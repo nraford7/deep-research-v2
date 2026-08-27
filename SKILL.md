@@ -1,9 +1,9 @@
 ---
-name: deep-research
+name: deeper-research
 description: Use when the user needs comprehensive, fact-checked, evidence-based research on any topic. Triggers on requests for deep research, literature reviews, comprehensive reports, or evidence-based analysis. Runs domain scoping, Exa retrieval slices with an evidence gate, question-driven deepening, synthesis, integration, mechanical citation verification, and a grounded adversary pass to produce a single authoritative reference document.
 ---
 
-# Deep Research
+# Deeper Research
 
 Retrieval-first deep research. Round 1 fetches a real evidence corpus with Exa
 search slices (plus a free OpenAlex/Semantic Scholar academic anchor), a hard
@@ -253,7 +253,7 @@ competent reader would expect is still absent?"
 
 **DEFAULT — follow the bundled squad procedure in `references/squad-audit.md`.** Every run
 performs Step 1.5 via that bundled procedure, not the single-model script. Read it now and
-execute it inline on this run dir: you (the deep-research orchestrator) dispatch the persona
+execute it inline on this run dir: you (the deeper-research orchestrator) dispatch the persona
 subagents yourself per that file — there is no separate skill to invoke. The squad runs a cheap mechanical scope-checklist pass (every technique
 the scope names + a disciplined sibling sweep for in-domain methods the scope forgot),
 THEN four isolated reader personas for the depth gaps a checklist can't see, merges
@@ -676,8 +676,8 @@ adversary.
   and the `adversary` chain. Omit them to accept the code defaults.
 - **`[defaults]` table** — names providers for one-off calls (`utility` → Round-0 scoping).
 
-**Config discovery** (later overrides earlier): `~/.config/deep-research/config.toml`,
-then `./deep-research.toml`. `DEEP_RESEARCH_CONFIG` (env) overrides the search path for
+**Config discovery** (later overrides earlier): `~/.config/deeper-research/config.toml`,
+then `./deeper-research.toml`. `DEEPER_RESEARCH_CONFIG` (env) overrides the search path for
 the `[run]`/`[slices]` tables. Copy `config.toml.example` and fill in inline keys; both
 TOML paths are gitignored.
 
@@ -710,7 +710,7 @@ enables Bash/Edit/Write in your cwd — avoid it for unattended subprocesses.
 ## When to Use
 
 - User asks for deep research, comprehensive analysis, or an evidence-based report.
-- User says `/deep-research [topic]`.
+- User says `/deeper-research [topic]`.
 - User needs a literature review, state-of-knowledge summary, or authoritative reference.
 - Any research task where accuracy, citation quality, and completeness outweigh speed.
 
@@ -739,7 +739,7 @@ python3 scripts/lint_background.py "$RUN/sections/"      # numeric tripwire insi
 
 ## Execution Checklist
 
-When `/deep-research [topic]` is invoked:
+When `/deeper-research [topic]` is invoked:
 
 0. **Stage 0 framing** — unless the ask is already well-framed or the user passed a
    skip signal, run ONE `AskUserQuestion` (≤3 questions: umbrella question,

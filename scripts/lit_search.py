@@ -56,7 +56,7 @@ class CappedRetry(Retry):
 
 def _make_session():
     s = requests.Session()
-    s.headers.update({"User-Agent": "deep-research/1.0"})
+    s.headers.update({"User-Agent": "deeper-research/1.0"})
     retry = CappedRetry(total=4, backoff_factor=0.8, status_forcelist=[429, 500, 502, 503, 504],
                   allowed_methods=frozenset(["GET"]), respect_retry_after_header=True)
     adapter = HTTPAdapter(max_retries=retry, pool_connections=8, pool_maxsize=16)
@@ -111,7 +111,7 @@ DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
 
 def query_openalex(topic: str, limit: int = 50):
     s = _make_session()
-    s.headers.update({"User-Agent": f"deep-research/1.0 (mailto:{CONTACT})"})
+    s.headers.update({"User-Agent": f"deeper-research/1.0 (mailto:{CONTACT})"})
     results = []
     per_page = min(50, limit)
     pages = (limit + per_page - 1) // per_page
@@ -198,7 +198,7 @@ def openalex_cites(work_ids, limit: int = 25):
     if not bare:
         return []
     s = _make_session()
-    s.headers.update({"User-Agent": f"deep-research/1.0 (mailto:{CONTACT})"})
+    s.headers.update({"User-Agent": f"deeper-research/1.0 (mailto:{CONTACT})"})
     out = []
     batches = 0
     failed = 0
@@ -262,7 +262,7 @@ def openalex_works_by_id(ids):
     if not bare and not dois:
         return []
     s = _make_session()
-    s.headers.update({"User-Agent": f"deep-research/1.0 (mailto:{CONTACT})"})
+    s.headers.update({"User-Agent": f"deeper-research/1.0 (mailto:{CONTACT})"})
     out = []
     # Partial-tolerant batching (G5): each batch is attempted independently. A
     # batch that errors is recorded as failed and the loop CONTINUES the other
