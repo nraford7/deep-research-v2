@@ -35,7 +35,8 @@ Without it, retrieval scripts exit `20`.
 
 **LLM keys — set whichever you have.** Reasoning roles use the selected adapter's
 native subagents by default. The sole current exception is Round 2: an explicit
-`[defaults].synthesis` selects its configured executor instead. Metered providers below
+`[defaults].synthesis` selects its configured executor instead; if that provider is
+unavailable, configuration fails rather than switching executors. Metered providers below
 are used only when a script or subagent needs a direct API call:
 ```
 ANTHROPIC_API_KEY    # Claude direct API provider
@@ -314,10 +315,12 @@ Dispatch **one synthesis subagent** to read the entire Round-1 corpus (all
 `round1/slice_*.jsonl` + `brief_*.md` + the anchor) and produce a comparison. For any
 row with a `text_path`, **read that `round1/sources/<file>.txt` full-text file** and
 reason over the document itself — the highlights are only an index into it, not the
-evidence. If `[defaults].synthesis` explicitly names an available provider, that
-configured provider is the actual synthesis executor and is bounded by
+evidence. If `[defaults].synthesis` explicitly names a provider, that configured
+provider is the actual synthesis executor and is bounded by
 `--max-cost-usd`. Only when that setting is absent, use the selected adapter's native
 synthesis subagent (subscription-backed under Codex or Claude Code when available).
+If the named provider is unavailable, stop with the configuration error; never fall
+through to a host or metered provider.
 Record the actual executor and use its family for Round 4 adversary selection.
 
 **The synthesizer MUST emit these EXACT markdown headers** — `deepen_questions.py`
@@ -566,15 +569,18 @@ citation and rewrite the claim as normal cited prose carrying that `[Author, Yea
 cut it. A fenced claim with no retrieved citation stays inside its fence or is dropped:
 it is never lifted out unsupported.
 
-**Step 4.2 — refute-mode adversary (a DIFFERENT provider family).** Dispatch one
+**Step 4.2 — refute-mode adversary (an INDEPENDENT provider family).** Dispatch one
 adversary subagent whose job is to *refute* the draft — find unsupported claims, weak
 attributions, and figures the corpus does not support. It must run on a provider whose
-`family` differs from the **actual synthesis executor's** family so the critique is
-genuinely independent. Selection walks the configured `adversary` chain (default
-`grok → chatgpt → gemini`) and picks the first configured, available different-family
-provider. If none qualify, independent review is fail-closed: surface the missing
+`family` is independent from the **actual synthesis executor's** family: families must
+differ, and `openai` ↔ `xai` is also excluded in either direction because of
+common-corpus risk. Selection walks the configured `adversary` chain (default
+`grok → chatgpt → gemini`) and picks the first configured, available independent-family
+provider. Thus OpenAI/Codex synthesis skips both Grok and ChatGPT and selects Gemini
+when all three are available. If none qualify, independent review is fail-closed: surface the missing
 provider and stop before claiming independent review. A same-family critique may be
-kept only if it is explicitly labeled non-independent. Feed the adversary the section
+kept only if it is explicitly labeled non-independent; the OpenAI/xAI exclusion is
+handled the same way. Feed the adversary the section
 files plus `round4/citation-verification.md`; write its report to `round4/factcheck.md`.
 
 **Shard the adversary by section for long reports.** A single refute pass over a
@@ -584,8 +590,8 @@ per-position sections (Round 3) produce reports well past that. So for any repor
 over the whole document, each cross-checking ITS sections' quotes and attributions
 against the full-text store (`round1/sources/*.txt`) and writing a shard report
 (`round4/factcheck_<group>.md`, merged into `round4/factcheck.md`). **The
-different-provider-family rule holds per shard:** every shard still runs on a provider
-whose `family` differs from the actual synthesis executor. (This session, sharding into two adversaries caught a
+independent-provider-family rule holds per shard:** every shard still runs on a provider
+whose family passes the independence rule above. (This session, sharding into two adversaries caught a
 fabricated block quote with a fake-precise citation that a single whole-document pass
 skimmed past.)
 
@@ -665,7 +671,7 @@ the session model.
 | Squad coverage audit (personas + checklist) | balanced/cheaper | Bounded gap-finding (≤5 gaps/lens); a checklist pass is mechanical |
 | Fix pass (apply adversary edits, Round 4) | balanced/cheaper | Mechanical corrections against a findings list |
 | Scope (Round 0), glue/orchestration | balanced/cheaper | Trivial classification / bookkeeping |
-| Refute adversary (Round 4) | **different family** | Must differ from the actual synthesis executor's family; unchanged by this policy |
+| Refute adversary (Round 4) | **independent family** | Must differ from the synthesis family; OpenAI ↔ xAI is additionally excluded |
 
 **How to apply it:** keep orchestration on the selected adapter's balanced/cheaper
 role, then elevate synthesis and integration to its strongest available role. State
@@ -698,13 +704,15 @@ Four built-in provider families:
 | `gemini` (Google) | `google` |
 | `grok` (xAI) | `xai` |
 
-TOML providers set their own `family` (default `"other"`). **The adversary must differ
-in family from the actual synthesis executor** so its refutation is independent.
+TOML providers set their own `family` (default `"other"`). **The adversary must be
+independent from the actual synthesis executor's family.** Ordinarily that means a
+different family; additionally, `openai` and `xai` are mutually excluded because of
+common-corpus risk while Grok correctly retains `family = "xai"`.
 `config.load_run_config()` walks the configured `adversary` chain (default
-`["grok", "chatgpt", "gemini"]`), skips unavailable and same-family providers, and
-returns the first available different-family provider. If none qualify, independent
+`["grok", "chatgpt", "gemini"]`), skips unavailable and non-independent providers,
+and returns the first available independent provider. If none qualify, independent
 review is fail-closed: surface the missing provider and stop before claiming it. A
-same-family critique may be retained only when explicitly labeled non-independent.
+non-independent critique may be retained only when explicitly labeled as such.
 
 ## Provider/Agent Config (TOML)
 
@@ -716,7 +724,9 @@ same-family critique may be retained only when explicitly labeled non-independen
   and the `adversary` chain. Omit them to accept the code defaults.
 - **`[defaults]` table** — names providers for one-off calls (`utility` → Round-0
   scoping) and, when explicitly set, the actual synthesis executor (`synthesis` →
-  Round 2). Without `synthesis`, Round 2 uses the selected adapter's native subagent.
+  Round 2). Every nonempty explicit role selection is authoritative: if its named
+  provider is unavailable, configuration errors instead of falling back. Without
+  `synthesis`, Round 2 uses the selected adapter's native subagent.
 
 **Config discovery** (later overrides earlier): `~/.config/deeper-research/config.toml`,
 then `./deeper-research.toml`. `DEEPER_RESEARCH_CONFIG` (env) overrides the search path for
@@ -734,10 +744,15 @@ TOML paths are gitignored.
 Host-native subscription CLI providers (`claude-sub`, `codex-sub`) can authenticate via
 the active Claude Pro/Max or ChatGPT subscription, with no per-token API charge.
 Configured generic CLI providers may be metered or use different credentials and must
-not be described as subscription-backed. `call_cli` scrubs `ANTHROPIC_API_KEY` /
-`OPENAI_API_KEY` from the subprocess env so host CLIs use their own auth. `codex-sub`
+not be described as subscription-backed. Direct CLI calls scrub `ANTHROPIC_API_KEY` /
+`OPENAI_API_KEY` from the subprocess env so host CLIs use their own auth. Codex calls
+also scrub `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, and `OPENAI_BASE_URL` while retaining
+the CLI's stored subscription authentication. `codex-sub`
 uses `codex exec --ephemeral --sandbox read-only --skip-git-repo-check -` for text-only
-direct calls; the prompt is sent on standard input. To let a `claude` cli provider
+direct calls; the prompt is sent on standard input. Codex `extra_args` are validated at
+runtime and may contain only `--strict-config` and `--color` with `auto`, `always`, or
+`never`; set the model through the provider's `model` field. Claude `extra_args` retain
+their existing behavior. To let a `claude` cli provider
 search the live web:
 
 ```toml
@@ -917,7 +932,7 @@ When `$deeper-research [topic]` (Codex) or `/deeper-research [topic]` (Claude Co
 | Silent bucket loss in deepening | Round 2 MUST emit the six EXACT headers (a typo empties a bucket) |
 | Fabricated / unresolvable citations | `verify_citations.py` resolves every cite against OpenAlex/Crossref |
 | Dead or spoofed links | Three-state SSRF-hardened probe → `## ⚠ Unresolved links` |
-| Echo-chamber review | Adversary forced onto a family different from the actual synthesis executor |
+| Echo-chamber review | Adversary forced through the independent-family rule; OpenAI ↔ xAI is excluded |
 | Bibliography skewed to blogs/wikis | `classify_sources.py` quality score |
 | Major canonical works missing | `lit_search.py --compare-bib` |
 | Partial retrieval failure | `slice_search.py --resume` skips slices whose jsonl parses |

@@ -11,8 +11,9 @@ subscription providers across adapters.
 | Any other host | Generic fallback | configured provider only | Host-supported delegation, if any | configured/local convention | configured CLI or API provider |
 
 `config.py` detects Codex before Claude when both environment marker families are
-present. Explicit TOML provider names and `[defaults]` selections remain
-authoritative. An explicit `[defaults].synthesis` selects the configured provider
+present. Explicit TOML provider names and nonempty `[defaults]` selections remain
+authoritative: if a selected provider is unavailable, configuration fails instead of
+falling through to another executor. An explicit `[defaults].synthesis` selects the configured provider
 that actually runs **Round 2 synthesis**; only when it is absent does that round use the
 selected host's native subagent. Coverage-panel work, Round 3 integration, and the fix
 pass remain host-native unless a future setting explicitly configures them. The Round 2
@@ -27,7 +28,7 @@ configured CLI/API provider uses a Codex or Claude subscription.
   rather than waiting for input.
 - Assign models by role: **strongest available** for synthesis and integration;
   **balanced/cheaper** for scoping, checklist work, squad lenses, and fix passes;
-  **different family** for the adversary. Do not substitute a provider name or
+  **independent family** for the adversary. Do not substitute a provider name or
   model alias for the role requirement.
 - Every generating lens and every per-gap verifier gets a fresh, isolated
   context. Pool results by union, deduplicate by meaning, and never persona-swap
@@ -36,9 +37,10 @@ configured CLI/API provider uses a Codex or Claude subscription.
   batch the same isolated prompts through its available slots. Batching is not
   permission to combine personas or change their prompts.
 - Compare the adversary provider family to the family of the **actual synthesis
-  executor**, not to a hardcoded vendor. An unavailable different-family provider is
-  fail-closed: do not claim independent review. A same-family critique may be retained
-  only when it is explicitly labeled non-independent.
+  executor**, not to a hardcoded vendor. Families must differ, and `openai` ↔ `xai`
+  is also excluded in either direction because of common-corpus risk. An unavailable
+  independent provider is fail-closed: do not claim independent review. A critique
+  that fails this policy may be retained only when explicitly labeled non-independent.
 
 ## Codex adapter
 
@@ -56,6 +58,11 @@ codex exec --ephemeral --sandbox read-only --skip-git-repo-check -
 ```
 
 Pass the prompt on standard input. The read-only form is for text-only utility calls.
+At the runtime boundary, Codex `extra_args` may contain only `--strict-config` and
+`--color` with `auto`, `always`, or `never`; the provider's `model` field controls the
+model. Direct Codex children do not inherit `OPENAI_API_KEY`, `CODEX_API_KEY`,
+`CODEX_ACCESS_TOKEN`, or `OPENAI_BASE_URL`, while stored subscription authentication
+remains available.
 A headless full-pipeline run must set `--sandbox workspace-write` from its own run
 directory and use no broader write root; it still retains every evidence gate and
 output constraint.
@@ -81,7 +88,7 @@ default under Claude Code, except where Round 2 is explicitly overridden.
 Use only configured CLI/API providers and whatever native delegation the host
 actually supports. If no native subagent capability exists, use the documented
 single-model fallback and label the limitation. Keep role-based selection,
-isolation where delegation exists, and the different-family adversary rule. Do
+isolation where delegation exists, and the independent-family adversary rule. Do
 not refer to `codex-sub`, `claude-sub`, a Codex roster, a Claude roster, or a
 subscription unless that capability is actually present.
 

@@ -37,7 +37,7 @@ The shared skill runs natively in Codex and Claude Code, producing the same deli
 
 - Round 0 domain scoping that injects source priorities per field
 - Mechanical citation verification against OpenAlex and Crossref (free, no key)
-- A source-tier audit, a missing-literature check, and a refute adversary forced onto a different provider family
+- A source-tier audit, a missing-literature check, and a refute adversary forced through an independent-family policy
 - Disagreement preserved as a `[disputed: ...]` tag, never a silent average
 - Bundled project-wide semantic search across every Bible
 - The same TOML provider configuration and the shared lineage of helper scripts
@@ -68,7 +68,7 @@ See `SKILL.md` for the full architecture, prompt templates, and failure modes.
 - **Confidence tagging** — high-stakes claims carry `[confidence: high/medium/low]`
 - **Mechanical citation verification** — resolves every `[Author, Year]` against OpenAlex and Crossref (free, no key)
 - **Three-state SSRF-hardened link probe** — `--check-urls` reports unresolved / indeterminate-with-reason / truncated, never a naive dead-URL binary
-- **Different-family adversary** — a refute-mode pass forced onto a provider family that differs from the actual synthesis executor's
+- **Independent-family adversary** — a refute-mode pass uses a different provider family and also excludes OpenAI ↔ xAI because of common-corpus risk
 - **Source tier audit** — scores bibliography quality (peer-reviewed vs blog vs wiki)
 - **Missing-literature check** — compares against OpenAlex top-N to flag canonical works absent from the bibliography
 - **BibTeX + JSONL export** — machine-readable downstream consumption
@@ -214,7 +214,7 @@ whole pipeline on one model (the **Tier 1 hybrid**):
 | Synthesis (Round 2) | strongest available — sets the field-map frame; a single call |
 | Integration sections (Round 3) | strongest available — the prose you read, and the biggest token sink |
 | Squad audit, fix-pass, scoping, glue | balanced/cheaper |
-| Refute adversary (Round 4) | family different from the actual synthesis executor |
+| Refute adversary (Round 4) | independent family; OpenAI ↔ xAI is excluded |
 
 Use the active runtime's balanced/cheaper role for orchestration and elevate synthesis +
 integration to its strongest available role. An explicit `[defaults].synthesis` instead
@@ -312,8 +312,12 @@ Providers can also be defined in TOML for arbitrary OpenAI-compatible endpoints 
 (Round 0 + Round 1). The optional `[defaults]` TOML table lets you name a provider for
 one-off calls: `[defaults].utility` controls which provider `scope.py --use-llm` uses
 for Round 0 scoping. An explicit `[defaults].synthesis` selects the provider that
-actually runs Round 2; when absent, the active host's native subagent is used. The
-actual synthesis executor's family governs adversary selection.
+actually runs Round 2; when absent, the active host's native subagent is used. Every
+nonempty explicit role selection is authoritative: if the named provider is
+unavailable, configuration errors instead of silently choosing another executor. The
+actual synthesis executor's family governs adversary selection. Families must differ,
+and OpenAI ↔ xAI is additionally excluded in either direction; Grok still retains its
+accurate `xai` family metadata.
 
 Providers can also be local CLI tools (`api_type = "cli"`) — `codex-sub` and
 `claude-sub` are auto-detected only when their active-host marker and matching CLI are
@@ -322,7 +326,12 @@ use the corresponding subscription; generic configured CLIs may be metered or us
 credentials and must not be described as subscription-backed. `codex-sub` uses a
 text-only `codex exec` call with `--ephemeral`, `--sandbox read-only`, and
 `--skip-git-repo-check`; Claude uses `claude -p` with explicit least-privilege allowed
-tools. To enable live web search on a Claude CLI provider, set
+tools. Codex direct calls remove `OPENAI_API_KEY`, `CODEX_API_KEY`,
+`CODEX_ACCESS_TOKEN`, and `OPENAI_BASE_URL` from the child environment so stored
+subscription authentication cannot be replaced by API routing. Codex `extra_args` are
+limited to `--strict-config` and `--color {auto,always,never}`; set the model through
+the provider's `model` field. Claude `extra_args` remain unchanged. To enable live web
+search on a Claude CLI provider, set
 `extra_args = ["--allowedTools", "WebSearch", "Bash(curl:*)"]` (search + curl-only
 fetching; no Edit/Write, no other shell commands — WebFetch is banned pipeline-wide
 because it returns an AI summary of the page rather than raw text) and add

@@ -200,6 +200,10 @@ BUILTIN_PROVIDER_SPECS: dict[str, dict] = {
 # Convenience reference consumed by the cost-estimation module.
 DEFAULT_PRICING = {name: spec["pricing"] for name, spec in BUILTIN_PROVIDER_SPECS.items()}
 
+# OpenAI and xAI remain distinct vendor/model families, but their shared-corpus risk
+# makes either one unsuitable as an independent adversary for the other.
+_ADVERSARY_EXCLUDED_FAMILY_PAIRS = frozenset({frozenset(("openai", "xai"))})
+
 
 class ConfigError(Exception):
     pass
@@ -377,13 +381,17 @@ def load_defaults(toml_paths):
 def pick_provider(providers, role, defaults, fallback=("claude-sub", "claude", "chatgpt"),
                   host=None):
     """Resolve a provider for a one-off role (e.g. 'utility'): the [defaults][role]
-    provider if configured, else the first available provider in `fallback`, else any
+    provider if configured and available; an unavailable explicit selection is an
+    error. Otherwise use the first available provider in `fallback`, then any
     available provider, else None."""
+    name = defaults.get(role)
+    if name:
+        if name not in providers:
+            raise ConfigError(
+                f"Explicit provider '{name}' for role '{role}' is not available.")
+        return providers[name]
     if not providers:
         return None
-    name = defaults.get(role)
-    if name and name in providers:
-        return providers[name]
     host_spec = _host_spec(detect_host() if host is None else host)
     if host_spec is not None and host_spec.provider_name in providers:
         return providers[host_spec.provider_name]
@@ -489,7 +497,7 @@ def _slice_from_table(name, t):
 
 def _resolve_adversary(chain, providers, synthesizer_name, host=None):
     """Walk the configured chain; pick the first configured+available provider whose
-    family differs from the actual synthesizer. Skip chain entries naming no configured provider.
+    family is independent from the actual synthesizer. Skip chain entries naming no configured provider.
     If none qualify, warn and fall back to the synthesizer provider name."""
     synthesizer = providers.get(synthesizer_name)
     host_spec = _host_spec(detect_host() if host is None else host)
@@ -501,17 +509,19 @@ def _resolve_adversary(chain, providers, synthesizer_name, host=None):
         if prov is None:
             skipped.append(entry)
             continue
-        if prov.family == synthesizer_family:
+        family_pair = frozenset((prov.family, synthesizer_family))
+        if (prov.family == synthesizer_family
+                or family_pair in _ADVERSARY_EXCLUDED_FAMILY_PAIRS):
             continue
         return entry, None
     reasons = []
     if skipped:
         reasons.append(f"chain entries not configured: {', '.join(skipped)}")
-    reasons.append(f"no configured provider outside synthesizer family '{synthesizer_family}' "
-                   "available to act as adversary")
+    reasons.append(f"no configured provider independent from synthesizer family "
+                   f"'{synthesizer_family}' available to act as adversary")
     warning = (f"Adversary falls back to the synthesizer '{synthesizer_name}' "
-               f"(same family as synthesis) — {'; '.join(reasons)}. "
-               "Configure a different-family provider for an independent adversary.")
+               f"(not independent from synthesis) — {'; '.join(reasons)}. "
+               "Configure an independent provider for the adversary.")
     return synthesizer_name, warning
 
 
@@ -552,7 +562,7 @@ def load_run_config(toml_paths=None, env=None):
     providers, _ = load_config(toml_paths, env)
     defaults = load_defaults(toml_paths)
     host = detect_host(env)
-    synthesizer = pick_provider(providers, "synthesis", defaults, host=host) if providers else None
+    synthesizer = pick_provider(providers, "synthesis", defaults, host=host)
     synthesizer_name = synthesizer.name if synthesizer is not None else "claude"
     adversary, adversary_warning = _resolve_adversary(
         adversary_chain, providers, synthesizer_name, host=host)

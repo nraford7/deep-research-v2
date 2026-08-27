@@ -22,7 +22,7 @@ When the corresponding CLI is installed, configuration loading will expose one i
 - `codex-sub`: `api_type = "cli"`, `command = "codex"`, `family = "openai"`.
 - `claude-sub`: `api_type = "cli"`, `command = "claude"`, `family = "anthropic"`.
 
-Explicit TOML providers may override these names. An explicit `[defaults]` selection remains authoritative. Otherwise, one-off utility calls prefer the active host's subscription provider before metered API providers.
+Explicit TOML providers may override these names. A nonempty explicit `[defaults]` selection remains authoritative: if its named provider is unavailable, configuration fails rather than selecting a fallback. Otherwise, one-off utility calls prefer the active host's subscription provider before metered API providers.
 
 ## Native Orchestration
 
@@ -31,15 +31,15 @@ The skill will load `references/runtime-adapters.md` at invocation and select ex
 - Codex uses native Codex subagents for the coverage panel, synthesis, integration, and fix pass. It batches work when the host concurrency limit is smaller than the requested fan-out.
 - Claude uses the existing Agent/subagent behavior.
 - Interactive questions use the host's supported input mechanism; ordinary chat questions are the fallback. Headless runs skip interactive framing.
-- Model policy is expressed by role (`strongest available`, `balanced/cheaper`, and `different family`) rather than hardcoded `opus` and `sonnet`. Host-specific examples may still name valid runtime commands.
+- Model policy is expressed by role (`strongest available`, `balanced/cheaper`, and `independent family`) rather than hardcoded `opus` and `sonnet`. Host-specific examples may still name valid runtime commands.
 
-Direct, script-driven LLM calls use the active host's CLI subscription provider. `codex exec` runs ephemerally, reads its prompt from stdin, skips the Git-repository requirement, and uses a read-only sandbox because these calls only return text.
+Direct, script-driven LLM calls use the active host's CLI subscription provider. `codex exec` runs ephemerally, reads its prompt from stdin, skips the Git-repository requirement, and uses a read-only sandbox because these calls only return text. Codex child processes cannot inherit API/routing overrides (`OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, or `OPENAI_BASE_URL`). Runtime validation limits Codex `extra_args` to `--strict-config` and `--color {auto,always,never}`; the provider model field remains the only model override.
 
 ## Independent Adversary
 
-Adversary selection compares provider family against the family of the actual synthesizer. Under Codex/OpenAI synthesis, Grok and ChatGPT are same-family and do not qualify; Anthropic, Google, or another non-OpenAI family may qualify. Under Claude/Anthropic synthesis, the existing non-Anthropic rule remains the resulting behavior.
+Adversary selection compares provider family against the family of the actual synthesizer. Families must differ, and OpenAI ↔ xAI is additionally excluded in either direction because of common-corpus risk. Grok retains the accurate `xai` family value, but under Codex/OpenAI synthesis neither Grok nor ChatGPT qualifies; Anthropic, Google, or another independent family may qualify. Under Claude/Anthropic synthesis, the existing non-Anthropic rule remains the resulting behavior.
 
-An unavailable different-family adversary is a fail-closed condition for claiming independent review. The run may surface the missing provider and stop or clearly label a same-family critique as non-independent, but it must not silently report the adversary invariant as satisfied.
+An unavailable independent adversary is a fail-closed condition for claiming independent review. The run may surface the missing provider and stop or clearly label a critique that fails the independence policy as non-independent, but it must not silently report the adversary invariant as satisfied.
 
 ## Scope Boundaries
 

@@ -57,6 +57,8 @@ family     = "other"
 [providers.codex-sub]
 api_type = "cli"
 command  = "codex"
+# model  = "<current Codex model ID>"  # optional; model flags are not allowed in extra_args
+# extra_args = ["--strict-config", "--color", "never"]  # only permitted Codex extras
 family   = "openai"
 
 # Claude subscription provider — live web search at $0 API cost
@@ -72,11 +74,13 @@ command      = "claude"
 extra_args   = ["--allowedTools", "WebSearch", "Bash(curl:*)"]
 capabilities = ["web_search"]                     # marks it real-time-eligible
 family       = "anthropic"                         # same lineage as the metered `claude` built-in;
-                                                    # same-family adversaries are skipped
+                                                    # non-independent adversaries are skipped
 
 # One-off calls — active-host subscription preference applies automatically for utility
 # work. Uncommenting `synthesis` changes Round 2: it becomes the actual executor, and
-# adversary selection compares against that provider's family.
+# adversary selection compares against that provider's family. Every nonempty explicit
+# role is authoritative: an unavailable named provider is a configuration error, never
+# a request to fall back to the host subscription or a metered provider.
 # [defaults]
 # utility = "codex-sub"    # or "claude-sub"; explicit defaults win over auto-detection
 # synthesis = "codex-sub"  # explicit executor; omit to use native host synthesis
@@ -91,10 +95,11 @@ family       = "anthropic"                         # same lineage as the metered
 # min_evidence_total  = 10         # gate: minimum globally-unique evidence items
 # min_nonempty_slices = 2          # gate: minimum slices that returned ≥1 item
 # adversary           = ["grok", "chatgpt", "gemini"]  # walked in order; the first
-#                                  # configured + available provider whose family differs
-#                                  # from the ACTUAL synthesis executor becomes the adversary. If
+#                                  # configured + available independent provider becomes
+#                                  # the adversary. Families must differ, and OpenAI ↔ xAI
+#                                  # is also excluded because of common-corpus risk. If
 #                                  # none qualify, independent review is fail-closed: do
-#                                  # not report it as satisfied; configure a different-family provider.
+#                                  # not report it as satisfied; configure an independent provider.
 
 # ---------------------------------------------------------------------------
 # Round-1 slice roster. Omit all [slices.*] tables to accept the 5-slice code

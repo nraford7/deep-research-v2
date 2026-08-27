@@ -1,5 +1,7 @@
 import textwrap
 
+import pytest
+
 import config
 
 def test_builtin_agent_types_present():
@@ -323,12 +325,19 @@ def test_pick_provider_prefers_active_host_subscription_without_default(monkeypa
     got = config.pick_provider(providers, "utility", {})
     assert got is not None and got.name == "codex-sub"
 
-def test_pick_provider_falls_back_when_default_absent():
-    # default names a provider that isn't configured -> fall through to fallback order
+def test_pick_provider_rejects_unavailable_explicit_default():
     providers = {"claude": _p("claude"), "chatgpt": _p("chatgpt")}
-    got = config.pick_provider(providers, "utility", {"utility": "ghost"},
-                               fallback=("claude-sub", "claude", "chatgpt"))
-    assert got.name == "claude"
+    with pytest.raises(config.ConfigError, match="ghost.*utility"):
+        config.pick_provider(providers, "utility", {"utility": "ghost"},
+                             fallback=("claude-sub", "claude", "chatgpt"))
+
+
+def test_pick_provider_rejects_unavailable_explicit_synthesis_default():
+    providers = {"codex-sub": _p("codex-sub"), "gemini": _p("gemini")}
+    with pytest.raises(config.ConfigError, match="claude-sub.*synthesis"):
+        config.pick_provider(
+            providers, "synthesis", {"synthesis": "claude-sub"}, host="codex")
+
 
 def test_pick_provider_any_when_no_default_no_fallback_match():
     providers = {"weird": _p("weird")}
@@ -336,7 +345,7 @@ def test_pick_provider_any_when_no_default_no_fallback_match():
     assert got.name == "weird"     # last resort: any available provider
 
 def test_pick_provider_none_when_no_providers():
-    assert config.pick_provider({}, "utility", {"utility": "kimi"}) is None
+    assert config.pick_provider({}, "utility", {}) is None
 
 def test_default_toml_paths_returns_only_existing(tmp_path, monkeypatch):
     # project-local present, global absent

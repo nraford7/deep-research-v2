@@ -1,3 +1,5 @@
+import pytest
+
 import config, llm
 
 class FakeChat:
@@ -188,18 +190,26 @@ def test_complete_cli_generic_pipes_system_and_prompt():
     text = llm._complete_cli(None, prov, "SYS", "PROMPT")
     assert text == "SYS\n\nPROMPT"
 
-def test_complete_cli_scrubs_api_keys_from_subprocess_env(tmp_path, monkeypatch):
-    # a script that reports both ANTHROPIC_API_KEY and OPENAI_API_KEY values
-    script = tmp_path / "probe.sh"
-    script.write_text('#!/bin/sh\necho "A=$ANTHROPIC_API_KEY|O=$OPENAI_API_KEY"\n')
+def test_complete_codex_cli_scrubs_api_and_routing_credentials(tmp_path, monkeypatch):
+    script = tmp_path / "codex"
+    script.write_text(
+        '#!/bin/sh\necho '
+        '"A=$ANTHROPIC_API_KEY|O=$OPENAI_API_KEY|C=$CODEX_API_KEY|'
+        'T=$CODEX_ACCESS_TOKEN|B=$OPENAI_BASE_URL"\n')
     script.chmod(0o755)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anthropic-should-be-scrubbed")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-should-be-scrubbed")
+    monkeypatch.setenv("CODEX_API_KEY", "codex-api-should-be-scrubbed")
+    monkeypatch.setenv("CODEX_ACCESS_TOKEN", "codex-token-should-be-scrubbed")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://metered.example.invalid")
     prov = config.Provider("sub", "cli", "", "", command=str(script))
     text = llm._complete_cli(None, prov, "SYS", "PROMPT")
     assert "sk-anthropic-should-be-scrubbed" not in text
     assert "sk-openai-should-be-scrubbed" not in text
-    assert "A=|O=" in text
+    assert "codex-api-should-be-scrubbed" not in text
+    assert "codex-token-should-be-scrubbed" not in text
+    assert "metered.example.invalid" not in text
+    assert "A=|O=|C=|T=|B=" in text
 
 def test_complete_cli_nonzero_exit_raises(tmp_path):
     script = tmp_path / "fail.sh"
@@ -228,6 +238,39 @@ def test_cli_extra_args_appended():
     p = config.Provider("c", "cli", "", "", command="claude", extra_args=("--allowedTools", "WebSearch"))
     argv, _ = llm._cli_argv_and_input(p, "SYS", "PROMPT")
     assert argv[-2:] == ["--allowedTools", "WebSearch"]
+
+
+@pytest.mark.parametrize("extra_args", [
+    ("--dangerously-bypass-approvals-and-sandbox",),
+    ("--sandbox", "danger-full-access"),
+    ("--config", 'sandbox_mode="danger-full-access"'),
+    ("--profile", "unsafe"),
+    ("--color", "rainbow"),
+    ("--color",),
+])
+def test_complete_codex_cli_rejects_unsafe_extra_args_before_execution(
+        extra_args, monkeypatch):
+    def unexpected_run(*args, **kwargs):
+        pytest.fail("unsafe Codex extra_args reached subprocess execution")
+
+    monkeypatch.setattr(llm.subprocess, "run", unexpected_run)
+    provider = config.Provider(
+        "codex-sub", "cli", "", "", command="codex", extra_args=extra_args)
+    with pytest.raises(ValueError, match="Codex extra_args"):
+        llm._complete_cli(None, provider, "SYS", "PROMPT")
+
+
+def test_codex_safe_extra_args_preserve_mandatory_argv_contract():
+    provider = config.Provider(
+        "codex-sub", "cli", "", "gpt-safe", command="/opt/bin/codex",
+        extra_args=("--strict-config", "--color", "never"))
+    argv, stdin = llm._cli_argv_and_input(provider, "SYS", "PROMPT")
+    assert argv == [
+        "/opt/bin/codex", "exec", "--model", "gpt-safe",
+        "--strict-config", "--color", "never",
+        "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "-",
+    ]
+    assert stdin == "SYS\n\nPROMPT"
 
 
 def test_complete_cli_scrubs_api_keys_from_subprocess_env_both_keys(tmp_path, monkeypatch):

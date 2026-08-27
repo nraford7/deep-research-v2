@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make deeper-research use the invoking Codex or Claude subscription for primary reasoning while preserving a genuinely different-family adversary.
+**Goal:** Make deeper-research use the invoking Codex or Claude subscription for primary reasoning while preserving a genuinely independent-family adversary.
 
 **Architecture:** Detect the host once in the provider layer, materialize a host-affine CLI subscription provider, and make adversary selection relative to the selected synthesizer family. Keep orchestration portable through a runtime-adapter reference loaded by `SKILL.md`, while leaving retrieval and evidence processing unchanged.
 
@@ -15,9 +15,9 @@
 - The canonical clone is `/Users/noahraford/Projects/deeper-research`.
 - Codex discovery is `/Users/noahraford/.agents/skills/deeper-research`; Claude discovery is `/Users/noahraford/.claude/skills/deeper-research`; both resolve to the canonical clone.
 - Codex host markers take precedence when both Codex and Claude environment markers are present.
-- Explicit TOML provider and `[defaults]` choices remain authoritative.
+- Explicit TOML provider and nonempty `[defaults]` choices remain authoritative; unavailable explicit choices error instead of falling back.
 - Primary reasoning uses the invoking host's native subscription-backed agents; Exa retrieval and optional OpenAI embeddings are not relabeled as subscription-backed.
-- An independent adversary must have a family different from the actual synthesizer family.
+- An independent adversary must have a family different from the actual synthesizer family, with OpenAI ↔ xAI additionally excluded for common-corpus risk.
 - Do not push changes upstream.
 
 ---
@@ -56,13 +56,13 @@ Also assert the analogous Claude provider, no implicit provider for an unknown h
 
 Run: `python3 -m pytest -q tests/test_config.py tests/test_run_config.py`
 
-Expected: failures because `detect_host` and implicit subscription providers do not exist, and same-family selection is still hardcoded to Anthropic.
+Expected: failures because `detect_host` and implicit subscription providers do not exist, and adversary independence is still hardcoded to exact Anthropic-family inequality.
 
 - [ ] **Step 3: Implement minimal runtime/provider behavior**
 
 Add immutable host specs for Codex and Claude. Keep environment detection pure when an `env` mapping is supplied. Insert the implicit provider before TOML loading so an explicit table replaces it. Update `pick_provider` to prefer the detected host subscription when no explicit default is configured.
 
-Change adversary resolution to obtain the synthesizer provider, read its `family`, and skip any candidate with that same family. If the synthesizer is absent, retain the provider name and a conservative family inferred from the selected host.
+Change adversary resolution to obtain the synthesizer provider, read its `family`, and skip candidates that fail the independence policy (exact family equality or the OpenAI ↔ xAI common-corpus exclusion). If the synthesizer is absent, retain the provider name and a conservative family inferred from the selected host.
 
 - [ ] **Step 4: Run focused tests and confirm GREEN**
 
@@ -85,7 +85,7 @@ git commit -m "feat: select subscription provider by host runtime"
 
 **Interfaces:**
 - Preserves: `_cli_argv_and_input(provider, system_prompt, user_prompt) -> tuple[list[str], str]`.
-- Codex argv contract: `codex exec --ephemeral --sandbox read-only --skip-git-repo-check -`, plus optional `--model` and configured extra arguments.
+- Codex argv contract: `codex exec --ephemeral --sandbox read-only --skip-git-repo-check -`, plus optional `--model` from `Provider.model` and only allowlisted `--strict-config` / `--color {auto,always,never}` extra arguments.
 - Preserves: API and gateway credential scrubbing in `_complete_cli`.
 
 - [ ] **Step 1: Update the existing argv test first**
@@ -110,7 +110,7 @@ Expected: failure because the safety flags and stdin marker are absent.
 
 - [ ] **Step 3: Implement the Codex argv contract**
 
-Build Codex arguments in this order: binary, `exec`, optional `--model`, configured `extra_args`, `--ephemeral`, `--sandbox`, `read-only`, `--skip-git-repo-check`, `-`. Do not change Claude argument construction.
+Build Codex arguments in this order: binary, `exec`, optional `--model`, validated safe `extra_args`, `--ephemeral`, `--sandbox`, `read-only`, `--skip-git-repo-check`, `-`. Scrub Codex API/routing environment overrides before execution. Do not change Claude argument construction.
 
 - [ ] **Step 4: Run focused and complete LLM tests**
 
