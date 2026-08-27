@@ -134,6 +134,7 @@ def _cli_argv_and_input(provider, system_prompt, user_prompt):
         if provider.model:
             argv += ["--model", provider.model]
         argv += list(provider.extra_args)
+        argv += ["--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "-"]
         return argv, f"{system_prompt}\n\n{user_prompt}"  # system prepended (no dedicated flag)
     argv = [provider.command] + list(provider.extra_args)
     return argv, f"{system_prompt}\n\n{user_prompt}"

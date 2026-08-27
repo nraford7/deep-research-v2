@@ -216,7 +216,12 @@ def test_cli_argv_builder_claude_and_codex():
     assert "--model" in argv and "claude-opus-4-20250514" in argv and stdin == "USERPROMPT"
     px = config.Provider("x", "cli", "", "", command="codex")
     argv2, stdin2 = llm._cli_argv_and_input(px, "SYSPROMPT", "USERPROMPT")
-    assert argv2[:2] == ["codex", "exec"] and "--model" not in argv2 and stdin2 == "SYSPROMPT\n\nUSERPROMPT"
+    assert argv2[:2] == ["codex", "exec"]
+    assert "--ephemeral" in argv2
+    assert argv2[argv2.index("--sandbox") + 1] == "read-only"
+    assert "--skip-git-repo-check" in argv2
+    assert argv2[-1] == "-"
+    assert "--model" not in argv2 and stdin2 == "SYSPROMPT\n\nUSERPROMPT"
 
 
 def test_cli_extra_args_appended():
