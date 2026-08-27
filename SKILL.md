@@ -33,9 +33,10 @@ EXA_API_KEY          # Round-1 slices + Round-2.5 deep-reasoning (the retrieval 
 ```
 Without it, retrieval scripts exit `20`.
 
-**LLM keys — set whichever you have.** Reasoning rounds use the selected
-adapter's native subagents first. Metered providers below are used only when a
-script or subagent needs a direct API call:
+**LLM keys — set whichever you have.** Reasoning roles use the selected adapter's
+native subagents by default. The sole current exception is Round 2: an explicit
+`[defaults].synthesis` selects its configured executor instead. Metered providers below
+are used only when a script or subagent needs a direct API call:
 ```
 ANTHROPIC_API_KEY    # Claude direct API provider
 OPENAI_API_KEY       # ChatGPT (gpt-4.1)
@@ -771,14 +772,19 @@ so they do not interfere. Cap concurrency to available host slots and API/Exa li
 
 ```bash
 CONC=3                                   # never exceed available Codex slots
+SKILL_ROOT="${DEEPER_RESEARCH_SKILL_ROOT:-$HOME/.agents/skills/deeper-research}"
 mkdir -p research/_batch/logs
 while IFS= read -r q; do
   slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
   dir="$(pwd)/research/$slug"; mkdir -p "$dir"
   [ -f "$dir/RESEARCH-BIBLE.md" ] && { echo "skip $slug"; continue; }   # resumable
-  ( printf '%s\n' "Use the deeper-research skill to run the FULL pipeline for this question and \
-write RESEARCH-BIBLE.md into the run dir $dir. Use Codex native subagents; synthesis \
-and integration use the strongest available role, bounded roles use balanced/cheaper. \
+  ( printf '%s\n' "Use the deeper-research skill rooted at $SKILL_ROOT to run the FULL pipeline for this question. \
+Invoke every helper and dispatcher by its absolute path under $SKILL_ROOT (for example, \
+python3 $SKILL_ROOT/dispatch.py and python3 $SKILL_ROOT/scripts/<helper>.py); keep all \
+outputs under the writable run dir $dir and never write under $SKILL_ROOT. Use Codex native \
+subagents for coverage, integration, and fixes. For Round 2, honor an explicit \
+[defaults].synthesis executor; otherwise use a native strongest-available subagent. Use \
+the strongest available role for integration and balanced/cheaper roles for bounded work. \
 Headless: skip Stage-0 framing. QUESTION: $q" | \
     codex exec -C "$dir" --ephemeral --sandbox workspace-write --skip-git-repo-check - \
   ) > "research/_batch/logs/$slug.log" 2>&1 &
@@ -791,19 +797,25 @@ wait
 
 ```bash
 CONC=3
+SKILL_ROOT="${DEEPER_RESEARCH_SKILL_ROOT:-$HOME/.claude/skills/deeper-research}"
 mkdir -p research/_batch/logs
 # Prerequisite: execute each invocation in a pre-approved contained runner whose
-# only writable mount is "$dir". `--allowedTools` selects capabilities; it does not
-# path-scope Write/Edit by itself.
+# read-only mount is "$SKILL_ROOT" and whose only writable mount is "$dir".
+# `--allowedTools` selects capabilities; it does not path-scope Write/Edit by itself.
 while IFS= read -r q; do
   slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
   dir="$(pwd)/research/$slug"; mkdir -p "$dir"
   [ -f "$dir/RESEARCH-BIBLE.md" ] && continue
-  ( cd "$dir" && claude -p --allowedTools Read Edit Write WebSearch 'Bash(python3 scripts/*)' 'Bash(curl:*)' \
-      "Use the deeper-research skill to run the FULL pipeline for this question and \
-write RESEARCH-BIBLE.md into $dir. Use Claude native Agent subagents and the \
-role-based model policy: strongest available for synthesis/integration, balanced for \
-bounded roles. Headless: skip Stage-0 framing. QUESTION: $q" \
+  ( cd "$dir" && claude -p --allowedTools Agent Read Edit Write WebSearch \
+      "Bash(python3 $SKILL_ROOT/dispatch.py:*)" "Bash(python3 $SKILL_ROOT/scripts/*:*)" 'Bash(curl:*)' \
+      "Use the deeper-research skill rooted at $SKILL_ROOT to run the FULL pipeline for this question. \
+Invoke every helper and dispatcher by its absolute path under $SKILL_ROOT (for example, \
+python3 $SKILL_ROOT/dispatch.py and python3 $SKILL_ROOT/scripts/<helper>.py); keep all \
+outputs under the writable run dir $dir and never write under $SKILL_ROOT. Use Claude native \
+Agent subagents for coverage, integration, and fixes. For Round 2, honor an explicit \
+[defaults].synthesis executor; otherwise use a native strongest-available Agent subagent. Use \
+the strongest available role for integration and balanced roles for bounded work. \
+Headless: skip Stage-0 framing. QUESTION: $q" \
   ) > "research/_batch/logs/$slug.log" 2>&1 &
   while [ "$(jobs -rp | wc -l)" -ge "$CONC" ]; do sleep 5; done
 done < questions.txt
@@ -811,10 +823,12 @@ wait
 ```
 
 Notes that make either batch behave:
-- **Permissions:** Codex sets its run directory with `-C` and
-  `--sandbox workspace-write`; the `codex-sub` direct text-call form remains read-only.
-  Claude requires the documented pre-approved contained runner plus explicit allowed
-  tools; its allowed-tool list alone does not scope writes. (The No-WebFetch rule holds.)
+- **Permissions:** Codex sets its writable run directory with `-C` and
+  `--sandbox workspace-write`; the prompt supplies a read-only `SKILL_ROOT` for helpers,
+  while the `codex-sub` direct text-call form remains read-only. Claude requires the
+  documented pre-approved contained runner: mount `SKILL_ROOT` read-only and the run
+  directory writable, then use its explicit `Agent`/Bash allowlist. Its allowed-tool list
+  alone does not scope writes. (The No-WebFetch rule holds.)
 - **Concurrency:** batch rather than exceeding the host's available slots.
 - **Resumable:** skip any question whose run dir already has `RESEARCH-BIBLE.md`.
 - **Model:** state the role-based policy; do not hardcode Claude aliases in Codex runs.

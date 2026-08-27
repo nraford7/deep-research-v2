@@ -45,9 +45,10 @@ model      = "accounts/fireworks/models/glm-5p1"   # verify current id at firewo
 max_tokens = 32768
 family     = "other"
 
-# Subscription providers are auto-detected when the matching host CLI is available:
-# Codex adds `codex-sub`; Claude Code adds `claude-sub`. The declarations below are
-# optional overrides (for example, to add model/tool settings). An explicit
+# Subscription providers are auto-detected only when the active-host environment markers
+# and matching host CLI are both available: Codex adds `codex-sub`; Claude Code adds
+# `claude-sub`. The declarations below are optional overrides (for example, to add
+# model/tool settings). An explicit
 # `[defaults].synthesis` deliberately selects the provider that actually runs Round 2;
 # omit it to use the active host's native subagent.
 
