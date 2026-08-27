@@ -2,11 +2,15 @@ import config, llm
 
 class FakeChat:
     def __init__(self): self.kwargs = None
-    class _Msg:
-        def __init__(self, content): self.message = type("M", (), {"content": content})
+    _citations = None
     def create(self, **kw):
         self.kwargs = kw
-        return type("R", (), {"choices": [FakeChat._Msg("OPENAI-REPORT")]})
+        # emulate a streaming response: two content chunks, citations on the last
+        def chunk(content, citations=None):
+            delta = type("D", (), {"content": content})
+            choice = type("Ch", (), {"delta": delta})
+            return type("K", (), {"choices": [choice], "citations": citations})
+        return iter([chunk("OPENAI-"), chunk("REPORT", self._citations)])
 
 class FakeOpenAI:
     def __init__(self): self.chat = type("C", (), {"completions": FakeChat()})()
@@ -50,6 +54,28 @@ def test_complete_openai_passes_max_tokens_and_system():
     assert kw["model"] == "deepseek-v4-pro" and kw["max_tokens"] == 4096
     assert kw["messages"][0] == {"role": "system", "content": "SYS"}
     assert kw["messages"][1]["content"] == "PROMPT"
+
+def test_complete_openai_appends_citations_when_present():
+    prov = config.Provider("exa", "openai", "k", "exa", max_tokens=4096)
+    client = FakeOpenAI()
+    client.chat.completions._citations = ["https://a.example/1", "https://b.example/2"]
+    text = llm._complete_openai(client, prov, "SYS", "PROMPT")
+    assert "OPENAI-REPORT" in text
+    assert "https://a.example/1" in text and "Sources:" in text
+
+
+def test_make_client_anthropic_honors_base_url():
+    prov = config.Provider("glm", "anthropic", "k", "glm-5.2",
+                           base_url="https://api.z.ai/api/anthropic")
+    client = llm.make_client(prov)
+    assert str(client.base_url).startswith("https://api.z.ai/api/anthropic")
+
+
+def test_make_client_anthropic_default_base_url_when_unset():
+    prov = config.Provider("claude", "anthropic", "k", "claude-opus-4-20250514")
+    client = llm.make_client(prov)
+    assert "api.anthropic.com" in str(client.base_url)
+
 
 def test_complete_anthropic_uses_max_tokens_no_base_url():
     prov = config.Provider("claude", "anthropic", "k", "claude-opus-4-20250514", max_tokens=120000)
@@ -124,7 +150,9 @@ def test_complete_gemini_non_overload_propagates_immediately():
 def test_complete_openai_empty_response_raises():
     class _EmptyChat:
         def create(self, **kw):
-            return type("R", (), {"choices": [type("C", (), {"message": type("M", (), {"content": None})})]})
+            delta = type("D", (), {"content": None})
+            choice = type("Ch", (), {"delta": delta})
+            return iter([type("K", (), {"choices": [choice], "citations": None})])
     client = type("X", (), {"chat": type("Y", (), {"completions": _EmptyChat()})()})()
     prov = config.Provider("p", "openai", "k", "m")
     import pytest
@@ -146,7 +174,7 @@ def test_complete_anthropic_empty_content_list_raises():
 
 def test_complete_openai_empty_choices_raises():
     class _Chat:
-        def create(self, **kw): return type("R", (), {"choices": []})
+        def create(self, **kw): return iter([type("K", (), {"choices": [], "citations": None})])
     client = type("X", (), {"chat": type("Y", (), {"completions": _Chat()})()})()
     prov = config.Provider("p", "openai", "k", "m")
     import pytest

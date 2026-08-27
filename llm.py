@@ -11,17 +11,28 @@ import subprocess
 CLI_TIMEOUT_S = 1800  # CLI reports are long; generous timeout
 
 
+# 15-30k-word reports take well over the SDKs' ~10-minute default HTTP
+# timeouts (observed: kimi/gemini "Request timed out", glm "Connection error"
+# on full Round 1 generations while short calls succeed). The anthropic path
+# streams and is immune; give the others the same generous ceiling as the CLI.
+SDK_TIMEOUT_S = 1800
+
+
 def make_client(provider):
     if provider.api_type == "cli":
         return None                                # no SDK client; subprocess handles auth
     if provider.api_type == "anthropic":
         import anthropic
-        return anthropic.Anthropic(api_key=provider.api_key)
+        kwargs = {"api_key": provider.api_key}
+        if provider.base_url:                      # anthropic-compatible endpoints (e.g. z.ai GLM)
+            kwargs["base_url"] = provider.base_url
+        return anthropic.Anthropic(**kwargs)
     if provider.api_type == "gemini":
         from google import genai
-        return genai.Client(api_key=provider.api_key)
-    from openai import OpenAI                      # openai-compatible (grok/deepseek/glm/openrouter/fireworks)
-    kwargs = {"api_key": provider.api_key}
+        return genai.Client(api_key=provider.api_key,
+                            http_options={"timeout": SDK_TIMEOUT_S * 1000})  # ms
+    from openai import OpenAI                      # openai-compatible (perplexity/grok/deepseek/glm/openrouter/fireworks)
+    kwargs = {"api_key": provider.api_key, "timeout": SDK_TIMEOUT_S, "max_retries": 1}
     if provider.base_url:
         kwargs["base_url"] = provider.base_url
     return OpenAI(**kwargs)
@@ -29,18 +40,40 @@ def make_client(provider):
 
 def _complete_openai(client, provider, system_prompt, user_prompt):
     # GPT-5+ rejects `max_tokens`, requiring `max_completion_tokens`. Other
-    # OpenAI-compatible endpoints (grok, gpt-4.x) still use max_tokens.
+    # OpenAI-compatible endpoints (perplexity, grok, gpt-4.x) still use max_tokens.
     m = (provider.model or "").lower()
     token_kw = "max_completion_tokens" if m.startswith(("gpt-5", "o1", "o3", "o4")) else "max_tokens"
-    resp = client.chat.completions.create(
+    # Stream: multi-minute report generations over a single idle HTTP connection
+    # get dropped by some endpoints/load-balancers ("Connection error" on kimi/glm
+    # full reports while short calls succeed). Streaming keeps bytes flowing —
+    # same reason the anthropic path streams.
+    stream = client.chat.completions.create(
         model=provider.model,
         messages=[{"role": "system", "content": system_prompt},
                   {"role": "user", "content": user_prompt}],
+        stream=True,
         **{token_kw: provider.max_tokens},
     )
-    if not resp.choices or not resp.choices[0].message.content:
+    parts = []
+    citations = None
+    for chunk in stream:
+        if chunk.choices:
+            delta = chunk.choices[0].delta
+            if delta and getattr(delta, "content", None):
+                parts.append(delta.content)
+        # Some OpenAI-compatible search providers (Perplexity, Exa) carry grounding
+        # URLs in a non-standard `citations` field; keep the last one seen.
+        c = getattr(chunk, "citations", None)
+        if c:
+            citations = c
+    text = "".join(parts)
+    if not text:
         raise RuntimeError(f"provider '{provider.name}' returned an empty response")
-    return resp.choices[0].message.content
+    if citations:
+        urls = [str(u) for u in citations if u]
+        if urls:
+            text += "\n\nSources:\n" + "\n".join(f"- {u}" for u in urls)
+    return text
 
 
 def _complete_anthropic(client, provider, system_prompt, user_prompt):
@@ -110,6 +143,8 @@ def _complete_cli(client, provider, system_prompt, user_prompt):
     argv, stdin_text = _cli_argv_and_input(provider, system_prompt, user_prompt)
     env = dict(os.environ)
     env.pop("ANTHROPIC_API_KEY", None)   # force subscription auth, not metered API
+    env.pop("ANTHROPIC_AUTH_TOKEN", None)  # gateway tokens take precedence over subscription
+    env.pop("ANTHROPIC_BASE_URL", None)    # and a gateway base URL would misroute the call
     env.pop("OPENAI_API_KEY", None)
     proc = subprocess.run(argv, input=stdin_text, capture_output=True, text=True,
                           env=env, timeout=CLI_TIMEOUT_S)
