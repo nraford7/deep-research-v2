@@ -516,6 +516,40 @@ def _run_evidence_gate(run_dir):
     return proc.returncode
 
 
+def _safe_emit_matrix(run_dir, round1_dir, current_year):
+    """OPT-IN report emitter for --use-matrix. Reads the run's scope.json
+    (best-effort), builds the coverage matrix from the round1 slice rows, and
+    writes round1/coverage_matrix.json + one status line. The ENTIRE body is
+    wrapped so it can raise nothing and returns nothing — it can never change the
+    audit's return code. Called only on the audit's success paths."""
+    try:
+        from scripts import coverage_matrix_adapter as cma  # lazy: keep module import light
+
+        scope_path = Path(run_dir) / "scope.json"
+        try:
+            payload = json.loads(_read_text(scope_path)) if scope_path.exists() else {}
+            if not isinstance(payload, dict):
+                payload = {}
+        except (json.JSONDecodeError, OSError):
+            payload = {}
+
+        matrix = cma.build_matrix(payload, _iter_slice_rows(round1_dir), current_year)
+        report = cma.matrix_report(matrix)
+        (Path(round1_dir) / "coverage_matrix.json").write_text(
+            json.dumps(report, indent=2), encoding="utf-8")
+        print(f"coverage-matrix: status={report['status']} "
+              f"empty={len(report['empty_cells'])} "
+              f"single_primary={len(report['single_primary_cells'])}")
+    except Exception as exc:  # never let the opt-in report perturb the audit
+        # The notice print is itself guarded: a broken/closed stderr (e.g. the
+        # CLI piped into `head`) must not turn this handler's own print into an
+        # escaping BrokenPipeError that would change the audit's return code.
+        try:
+            print(f"coverage-matrix: skipped ({exc})", file=sys.stderr)
+        except Exception:
+            pass
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -529,6 +563,15 @@ def main(argv=None):
                          "fetch unchanged, so it is a fixed total, never a per-fetch "
                          "replenish, and never lowers a higher run cap. Omit to leave "
                          "the run's own cap untouched.")
+    ap.add_argument("--use-matrix", action="store_true",
+                    help="OPT-IN, default off: after a successful audit, also emit "
+                         "round1/coverage_matrix.json (the coverage-matrix report). "
+                         "Never changes the audit's behavior or return code.")
+    ap.add_argument("--current-year", type=int, default=None,
+                    help="Year used for source age in the --use-matrix report. "
+                         "No run artifact carries a date; omit → ages default to 0. "
+                         "Passed in (never datetime.now()) to keep this module "
+                         "clock-free.")
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir)
@@ -559,6 +602,8 @@ def main(argv=None):
 
             if not gaps:
                 print(f"Coverage audit round {round_no}: no material gaps, stopping.")
+                if args.use_matrix:
+                    _safe_emit_matrix(run_dir, round1_dir, args.current_year)
                 return 0
 
             seen_names = set()
@@ -637,8 +682,12 @@ def main(argv=None):
             context = _load_context(run_dir)
             if not gaps_remain(provider, args.topic, context):
                 print(f"Coverage audit round {round_no}: gaps filled, none remain, stopping.")
+                if args.use_matrix:
+                    _safe_emit_matrix(run_dir, round1_dir, args.current_year)
                 return 0
 
+        if args.use_matrix:
+            _safe_emit_matrix(run_dir, round1_dir, args.current_year)
         print(f"Coverage audit: reached --max-audit-rounds ({args.max_audit_rounds}), stopping.")
         return 0
 
