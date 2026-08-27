@@ -1,10 +1,10 @@
 # deeper-research
 
-Retrieval-first deep research — a real evidence corpus fetched with Exa search slices, a hard evidence gate that refuses to synthesize over thin material, question-driven deepening, mechanical citation verification, and a different-provider adversary. A Claude Code skill that scopes the domain, retrieves a fetched corpus (Exa slices + a free academic anchor), synthesizes over that evidence, chases root-cause / consequence / gap questions, integrates by topic section, verifies every citation against OpenAlex/Crossref, and lets an independent adversary try to refute the draft. Produces a fact-checked, fully-cited "Research Bible" plus BibTeX and a machine-readable claims file.
+Retrieval-first deep research for Claude Code. It scopes a topic, fetches a real evidence corpus with Exa search slices, and reasons only over what it found, producing a fact-checked, fully-cited "Research Bible" plus BibTeX and a machine-readable claims file. A hard evidence gate refuses thin material, and an independent adversary tries to refute the draft before you trust it.
 
 ## What it does
 
-Most LLM research is one model, one pass, hallucinated citations. This is retrieval-first: fetch the evidence, gate on it, reason over it — never over the model's memory.
+Most LLM research is one model, one pass, hallucinated citations. This is retrieval-first: fetch the evidence, gate on it, reason over it, never over the model's memory.
 
 ```
 Round 0    Domain scoping — classify topic, propose source priorities
@@ -20,6 +20,42 @@ Index      Refresh a project-wide semantic index over every topic's Bible (bundl
 Output     Hub-and-spoke Research Bible + BibTeX + claims.jsonl + provenance
              + searchable semantic index spanning every topic in the project
 ```
+
+## Lineage: inspired by deep-research, rebuilt evidence-first
+
+deeper-research began as [deep-research](https://github.com/nraford7/deep-research) and owes it the whole idea. The original runs five research strategies in parallel (academic, practitioner, real-time, grey-literature, contrarian), each driven by a different model provider, then triangulates their outputs on the principle that a fabricated citation rarely survives across three independent models. It works, and it still runs.
+
+But its starting point is the models themselves. Each agent answers from what its provider already knows, its own model memory, and leans on web search to fill the gaps. Triangulation catches many fabrications, yet the architecture still lets a plausible-but-wrong claim through whenever several models share the same bias or lean on the same secondary source. Memory-first research inherits the model's hallucinations and the model's blind spots.
+
+Picture a niche recent regulation. Five models trained on overlapping data, all past their cutoff, agree on a clause that was never enacted, and triangulation ratifies the fabrication precisely *because* they agree. Retrieval-first breaks that failure at the root. If no retrieved primary document contains the clause, the gate has nothing to synthesize from and the claim never reaches the page. Agreement stops being evidence; a fetched source becomes the evidence.
+
+So we rebuilt it from the ground up around a different first principle: **fetch the evidence before you reason over it.** deeper-research (this repo, version 2) retrieves a real document corpus with Exa search slices in Round 1, refuses to synthesize until a hard evidence gate confirms the corpus is thick enough, and reasons only over what was actually fetched. A claim traces to a source that exists, because the source was retrieved first, not recalled.
+
+### What stayed the same
+
+Both are Claude Code slash-command skills, and both produce the same deliverable (a fact-checked, fully-cited "Research Bible" plus BibTeX and a machine-readable claims file) through the same later-stage machinery:
+
+- Round 0 domain scoping that injects source priorities per field
+- Mechanical citation verification against OpenAlex and Crossref (free, no key)
+- A source-tier audit, a missing-literature check, and a refute adversary forced onto a different provider family
+- Disagreement preserved as a `[disputed: ...]` tag, never a silent average
+- Bundled project-wide semantic search across every Bible
+- The same TOML provider configuration and the shared lineage of helper scripts
+
+### What changed
+
+| | deep-research (v1) | deeper-research (v2) |
+|---|---|---|
+| First principle | Model memory, then web search | Retrieved evidence, then reasoning |
+| Round 1 | Five model agents generate reports in parallel | Exa retrieval slices fetch a real corpus |
+| Hallucination defense | Cross-model triangulation (agreement) | Evidence gate plus claim-to-source traceability |
+| Thin material | No gate: models paper over the gap | Hard refusal (exit 22) |
+| Bias exposure | Shared across models that happen to agree | Reduced: reasoning is bound to fetched sources |
+| Deepening | Iterative passes on weak sections | Root-cause / consequence / gap questions via Exa deep-reasoning |
+
+The trade is deliberate. v1's fleet casts a wide net from model knowledge and moves fast, which still suits quick breadth-first scoping or fast-moving topics where the freshest signal outruns any index. v2 binds every claim to fetched evidence, which costs a retrieval pass but pays off wherever a confident wrong answer is expensive: the case this rebuild was made for.
+
+See `SKILL.md` for the full architecture, prompt templates, and failure modes.
 
 ## What's new vs. a one-shot LLM
 
@@ -95,10 +131,13 @@ python3 scripts/evidence_gate.py --run-dir "$RUN"
 python3 scripts/citation_chase.py --run-dir "$RUN" --topic "$TOPIC"
 
 # 4b. Coverage audit: name + fill expected-but-absent coverage, then re-gate.
+#     DEFAULT is the bundled squad procedure (references/squad-audit.md), which the
+#     SKILL dispatches as subagents inline; the script below is the single-model
+#     FALLBACK for when subagents aren't available.
 #     Exit 0 = coverage verified; a NONZERO exit (30 no provider, 31 LLM error,
 #     32 bad JSON, 21 cap, 22 still thin) means coverage is UNVERIFIED: do NOT
 #     proceed to synthesis, surface and resolve it.
-python3 scripts/coverage_audit.py --run-dir "$RUN" --topic "$TOPIC"
+python3 scripts/coverage_audit.py --run-dir "$RUN" --topic "$TOPIC"   # fallback
 
 # → Round 2 synthesis subagent → $RUN/round2/synthesis.md (six exact headers)
 
@@ -184,7 +223,7 @@ Providers can also be local CLI tools (`api_type = "cli"`) — for example `clau
 | `scripts/slice_search.py` | Round-1 retrieval: Exa search slices + a free academic anchor; ledger-capped; writes jsonl briefs + manifest |
 | `scripts/evidence_gate.py` | Refuse synthesis over a thin corpus — exit 0 if thick enough and every row re-validates, else exit 22 |
 | `scripts/citation_chase.py` | Post-gate one-hop citation-graph fill: backward co-citation + a small forward citing-works pass, deduped against the corpus, written to `slice_citation.jsonl`, then re-gated. Fail-closed: exit 0 = ran (expanded or nothing new), nonzero (40 OpenAlex unreachable, 41 no resolvable seeds, 22 still thin) = could not complete, do not proceed as if expansion succeeded |
-| `scripts/coverage_audit.py` | Post-gate coverage auditor: name expected-but-absent coverage, fill each gap with a scope-bounded Exa slice, re-gate. Fail-closed: exit 0 = coverage verified, nonzero (30/31/32/21/22) = unverified, do not synthesize |
+| `scripts/coverage_audit.py` | Single-model **fallback** coverage auditor (the default is the bundled squad procedure in `references/squad-audit.md`): name expected-but-absent coverage, fill each gap with a scope-bounded Exa slice, re-gate. Fail-closed: exit 0 = coverage verified, nonzero (30/31/32/21/22) = unverified, do not synthesize |
 | `scripts/lint_background.py` | Round-4 numeric tripwire inside fenced editorial blocks: exit 0 clean, exit 1 if a fenced block names a quantity |
 | `scripts/deepen_questions.py` | Round 2.5 deepening: root-cause / consequence / gap questions answered with Exa deep-reasoning |
 | `scripts/cost.py` | Cost estimator + retrieval fee table |
@@ -217,17 +256,6 @@ research/
     │   └── fix-log.md
     └── round0..round5/            ← Provenance preserved
 ```
-
-## Why retrieval-first, not memory-first
-
-- **Fetched evidence, not recall** — Round 1 retrieves a real corpus with Exa slices + a free academic anchor; synthesis reasons over what was fetched, so a claim traces to a source that actually exists
-- **Refusal beats confident thin answers** — the evidence gate blocks synthesis over a thin corpus (exit 22) instead of letting a model paper over the gap
-- **Mechanical backstop** — `verify_citations.py` resolves every cite against OpenAlex/Crossref; what a draft invents, the resolver catches
-- **Chase the questions, not just the topic** — deepening splits root-cause / consequence / gap questions and answers each with targeted Exa deep-reasoning
-- **Independent critique** — the refute-mode adversary runs on a provider family that differs from the synthesizer's, so the review is not an echo chamber
-- **Disagreement is signal** — differing figures become a `[disputed: ...]` tag, never a silent average
-
-See `SKILL.md` for the full architecture, prompt templates, and failure modes.
 
 ## Tests
 
