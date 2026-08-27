@@ -783,79 +783,36 @@ set of sub-questions — and fan out one selected-adapter session per question. 
 session is fully isolated (its own context, Exa ledger, and `research/<slug>/` folder),
 so they do not interfere. Cap concurrency to available host slots and API/Exa limits.
 
-**Codex recipe** (use Codex headless sessions):
+Use `scripts/batch_research.py`; do not replace it with a fixed-concurrency shell loop.
+The default policy starts at two workers, adds one after each healthy 60-second window,
+and caps at eight:
 
 ```bash
-CONC=3                                   # never exceed available Codex slots
-SKILL_ROOT="${DEEPER_RESEARCH_SKILL_ROOT:-$HOME/.agents/skills/deeper-research}"
-mkdir -p research/_batch/logs
-while IFS= read -r q; do
-  slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
-  dir="$(pwd)/research/$slug"; mkdir -p "$dir"
-  [ -f "$dir/RESEARCH-BIBLE.md" ] && { echo "skip $slug"; continue; }   # resumable
-  ( printf '%s\n' "Use the deeper-research skill rooted at $SKILL_ROOT to run the FULL pipeline for this question. \
-Invoke every helper and dispatcher by its absolute path under $SKILL_ROOT (for example, \
-python3 $SKILL_ROOT/dispatch.py and python3 $SKILL_ROOT/scripts/<helper>.py); keep all \
-outputs under the writable run dir $dir and never write under $SKILL_ROOT. Use Codex native \
-subagents for coverage, integration, and fixes. For Round 2, honor an explicit \
-[defaults].synthesis executor; otherwise use a native strongest-available subagent. Use \
-the strongest available role for integration and balanced/cheaper roles for bounded work. \
-Headless: skip Stage-0 framing. QUESTION: $q" | \
-    codex exec -C "$dir" --ephemeral --sandbox workspace-write --skip-git-repo-check - \
-  ) > "research/_batch/logs/$slug.log" 2>&1 &
-  while [ "$(jobs -rp | wc -l)" -ge "$CONC" ]; do sleep 5; done   # throttle
-done < questions.txt
-wait
+python3 "$HOME/.agents/skills/deeper-research/scripts/batch_research.py" \
+  questions.txt --adapter codex --output-root research
 ```
 
-**Claude recipe** (same isolation and throttling, with Claude native agents):
+When a failed worker reports capacity/concurrency pressure or HTTP 429, the scheduler
+halves its target and pauses new launches for 120 seconds. It does not kill active work
+or automatically retry ordinary research, evidence-gate, or budget failures. Completed
+run directories are skipped, collisions get stable hashed slugs, and each question keeps
+its own log and ledger. `--dry-run` prints pending commands without launching them; use
+`--help` for policy overrides.
+
+For Claude, pass a pre-approved containment wrapper:
 
 ```bash
-CONC=3
-SKILL_ROOT="${DEEPER_RESEARCH_SKILL_ROOT:-$HOME/.claude/skills/deeper-research}"
-mkdir -p research/_batch/logs
-# Prerequisite: execute each invocation in a pre-approved contained runner whose
-# read-only mount is "$SKILL_ROOT" and whose only writable mount is "$dir".
-# `--allowedTools` selects capabilities; it does not path-scope Write/Edit by itself.
-while IFS= read -r q; do
-  slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
-  dir="$(pwd)/research/$slug"; mkdir -p "$dir"
-  [ -f "$dir/RESEARCH-BIBLE.md" ] && continue
-  ( cd "$dir" && claude -p "Use the deeper-research skill rooted at $SKILL_ROOT to run the FULL pipeline for this question. \
-Invoke every helper and dispatcher by its absolute path under $SKILL_ROOT (for example, \
-python3 $SKILL_ROOT/dispatch.py and python3 $SKILL_ROOT/scripts/<helper>.py); keep all \
-outputs under the writable run dir $dir and never write under $SKILL_ROOT. Use Claude native \
-Agent subagents for coverage, integration, and fixes. For Round 2, honor an explicit \
-[defaults].synthesis executor; otherwise use a native strongest-available Agent subagent. Use \
-the strongest available role for integration and balanced roles for bounded work. \
-Headless: skip Stage-0 framing. QUESTION: $q" \
-      --allowedTools Agent Read Edit Write WebSearch \
-      "Bash(python3 $SKILL_ROOT/dispatch.py:*)" "Bash(python3 $SKILL_ROOT/scripts/*:*)" 'Bash(curl:*)' \
-  ) > "research/_batch/logs/$slug.log" 2>&1 &
-  while [ "$(jobs -rp | wc -l)" -ge "$CONC" ]; do sleep 5; done
-done < questions.txt
-wait
+python3 "$HOME/.claude/skills/deeper-research/scripts/batch_research.py" \
+  questions.txt --adapter claude --output-root research \
+  --claude-runner "/absolute/path/to/contained-runner"
 ```
 
-Notes that make either batch behave:
-- **Permissions:** Codex sets its writable run directory with `-C` and
-  `--sandbox workspace-write`; the prompt supplies a read-only `SKILL_ROOT` for helpers,
-  while the `codex-sub` direct text-call form remains read-only. Claude requires the
-  documented pre-approved contained runner: mount `SKILL_ROOT` read-only and the run
-  directory writable, then use its explicit `Agent`/Bash allowlist. Its allowed-tool list
-  alone does not scope writes. (The No-WebFetch rule holds.)
-- **Concurrency:** batch rather than exceeding the host's available slots.
-- **Resumable:** skip any question whose run dir already has `RESEARCH-BIBLE.md`.
-- **Model:** state the role-based policy; do not hardcode Claude aliases in Codex runs.
-- **Monitor:** `tail -f research/_batch/logs/*.log` or
-  `watch 'find research -name RESEARCH-BIBLE.md | wc -l'`.
-- **Cost scales linearly:** each question ≈ its own retrieval ledger (~$0.5–0.8 Exa) plus
-  its LLM legs. Ten questions ≈ ten independent runs.
-- **OpenAlex flakiness** (verifier stall / `citation_chase` exit 40) can hit any run; tell
-  each session to surface it and continue rather than block.
-
-A ready-made driver for a guide-structured project lives alongside this pattern — see the
-project's `research/_tools/` (a chapter/question extractor + a capped fan-out script).
+The wrapper receives the complete Claude command plus `DEEPER_RESEARCH_SKILL_ROOT` and
+`DEEPER_RESEARCH_RUN_DIR`; it must mount the former read-only and make only the latter
+writable. `--allowedTools` alone does not path-scope writes. Codex workers enforce `-C`
+to the run directory with `--sandbox workspace-write`. Monitor
+`research/_batch/logs/*.log`. Cost scales linearly: adaptive scheduling changes
+throughput, not the per-question Exa/model spend or any evidence gate.
 
 ## Benchmark quickstart
 

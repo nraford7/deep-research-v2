@@ -94,15 +94,19 @@ subscription unless that capability is actually present.
 
 ## Headless batches
 
-One question still means one fully isolated run directory and ledger. Use the selected
-adapter's headless command, cap concurrent runs to available capacity, and keep each
-run's logs separate. The `DEEPER_RESEARCH_SKILL_ROOT` environment override points to the
-installed skill; otherwise use `~/.agents/skills/deeper-research` for Codex or
-`~/.claude/skills/deeper-research` for Claude. Prompts must invoke helpers and the
-dispatcher by absolute path beneath that root, while all outputs stay in the writable run
-directory. Codex batches set that run directory with `-C` and
-`--sandbox workspace-write`; Claude batches use explicit `Agent`/Bash allowed tools
-inside a pre-approved contained runner that mounts `SKILL_ROOT` read-only and only the
-run directory writable; generic batches use the configured provider command/API.
-Headless runs skip optional interactive framing, but never bypass retrieval, evidence,
-coverage, citation, or independent-adversary gates.
+One question still means one fully isolated run directory and ledger. Run
+`scripts/batch_research.py questions.txt --adapter codex` rather than implementing a
+fixed shell fan-out. Its adaptive target starts at two, adds one after each healthy
+60-second window, caps at eight, and halves after a failed worker reports shared capacity
+pressure or HTTP 429. Backoff delays only new launches: active work is never killed, and
+ordinary research failures are never retried automatically. Completed Bibles are skipped.
+
+The `DEEPER_RESEARCH_SKILL_ROOT` environment override points to the installed skill;
+otherwise the runner selects `~/.agents/skills/deeper-research` for Codex or
+`~/.claude/skills/deeper-research` for Claude. Codex workers set the isolated run directory
+with `-C` and `--sandbox workspace-write`. Claude requires `--claude-runner` naming a
+pre-approved wrapper; that wrapper receives the Claude command plus
+`DEEPER_RESEARCH_SKILL_ROOT` and `DEEPER_RESEARCH_RUN_DIR`, mounts the skill root
+read-only, and exposes only the run directory as writable. Headless runs skip optional
+interactive framing, but never bypass retrieval, evidence, coverage, citation, or
+independent-adversary gates.

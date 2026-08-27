@@ -1,0 +1,313 @@
+from scripts import batch_research
+import pytest
+import sys
+import time
+
+
+def test_adaptive_limit_starts_at_two_and_adds_one_per_healthy_window():
+    limit = batch_research.AdaptiveLimit(
+        initial=2,
+        maximum=8,
+        stability_window=60,
+        backoff_seconds=120,
+        now=0,
+    )
+
+    assert limit.target == 2
+    assert limit.advance(59) == 2
+    assert limit.advance(60) == 3
+    assert limit.advance(120) == 4
+
+
+def test_adaptive_limit_halves_on_saturation_and_requires_a_fresh_healthy_window():
+    limit = batch_research.AdaptiveLimit(
+        initial=2,
+        maximum=8,
+        stability_window=60,
+        backoff_seconds=120,
+        now=0,
+    )
+    assert limit.advance(300) == 7
+
+    assert limit.on_saturation(301) == 3
+    assert limit.can_launch(420) is False
+    assert limit.can_launch(421) is True
+    assert limit.advance(480) == 3
+    assert limit.advance(481) == 4
+
+
+def test_default_adaptive_clock_does_not_jump_straight_to_the_ceiling():
+    limit = batch_research.AdaptiveLimit(
+        initial=2,
+        maximum=8,
+        stability_window=60,
+        backoff_seconds=120,
+    )
+    assert limit.advance(time.monotonic()) == 2
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "HTTP 429: too many requests",
+        "rate_limit_exceeded",
+        "Too many active sessions for this account",
+        "Provider capacity temporarily unavailable",
+    ],
+)
+def test_only_failed_workers_with_capacity_signals_trigger_backoff(message):
+    assert batch_research.is_saturation_failure(1, message) is True
+    assert batch_research.is_saturation_failure(0, message) is False
+    assert batch_research.is_saturation_failure(22, "evidence gate failed") is False
+
+
+def test_prepare_jobs_isolates_slug_collisions_deduplicates_and_skips_completed(tmp_path):
+    questions = [" Alpha / Beta? ", "Alpha Beta", "", "Alpha / Beta?"]
+
+    jobs = batch_research.prepare_jobs(questions, tmp_path)
+
+    assert [job.question for job in jobs] == ["Alpha / Beta?", "Alpha Beta"]
+    assert jobs[0].run_dir.name.startswith("alpha-beta-")
+    assert jobs[1].run_dir.name.startswith("alpha-beta-")
+    assert jobs[0].run_dir != jobs[1].run_dir
+    assert jobs[0].log_path.parent == tmp_path / "_batch" / "logs"
+
+    (jobs[0].run_dir / "RESEARCH-BIBLE.md").write_text("done")
+    remaining = batch_research.prepare_jobs(questions, tmp_path)
+    assert [job.question for job in remaining] == ["Alpha Beta"]
+
+    reordered = batch_research.prepare_jobs(
+        ["Alpha Beta", "Alpha / Beta?"], tmp_path / "reordered"
+    )
+    original_slugs = {job.question: job.slug for job in jobs}
+    reordered_slugs = {job.question: job.slug for job in reordered}
+    assert reordered_slugs == original_slugs
+
+
+def test_prepare_jobs_keeps_slugs_stable_when_a_later_batch_adds_a_collision(tmp_path):
+    original = batch_research.prepare_jobs(["Alpha / Beta?"], tmp_path)
+    original[0].run_dir.joinpath("RESEARCH-BIBLE.md").write_text("done")
+
+    remaining = batch_research.prepare_jobs(["Alpha / Beta?", "Alpha Beta"], tmp_path)
+
+    assert [job.question for job in remaining] == ["Alpha Beta"]
+    assert remaining[0].run_dir != original[0].run_dir
+
+
+def test_codex_invocation_is_workspace_scoped_and_scrubs_api_routing(tmp_path):
+    job = batch_research.prepare_jobs(["Why adaptive scheduling?"], tmp_path)[0]
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+
+    invocation = batch_research.build_invocation("codex", job, skill_root)
+
+    assert invocation.argv == [
+        "codex",
+        "exec",
+        "-C",
+        str(job.run_dir),
+        "--ephemeral",
+        "--sandbox",
+        "workspace-write",
+        "--skip-git-repo-check",
+        "-",
+    ]
+    assert invocation.cwd == job.run_dir
+    assert invocation.stdin_text is not None
+    assert "QUESTION: Why adaptive scheduling?" in invocation.stdin_text
+    assert str(skill_root) in invocation.stdin_text
+
+    env = batch_research.child_environment(
+        "codex",
+        {
+            "KEEP_ME": "yes",
+            "OPENAI_API_KEY": "metered",
+            "CODEX_API_KEY": "metered",
+            "CODEX_ACCESS_TOKEN": "override",
+            "OPENAI_BASE_URL": "https://gateway.invalid",
+        },
+    )
+    assert env == {"KEEP_ME": "yes"}
+
+
+def test_claude_requires_a_contained_runner_and_scrubs_metered_routing(tmp_path):
+    job = batch_research.prepare_jobs(["How does containment work?"], tmp_path)[0]
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+
+    with pytest.raises(ValueError, match="contained runner"):
+        batch_research.build_invocation("claude", job, skill_root)
+
+    invocation = batch_research.build_invocation(
+        "claude", job, skill_root, claude_runner=["contained-runner", "--quiet"]
+    )
+    assert invocation.argv[:4] == ["contained-runner", "--quiet", "claude", "-p"]
+    prompt_index = invocation.argv.index("-p") + 1
+    assert "QUESTION: How does containment work?" in invocation.argv[prompt_index]
+    assert invocation.argv.index("--allowedTools") > prompt_index
+    assert "Agent" in invocation.argv
+    assert "WebFetch" not in invocation.argv
+    assert invocation.cwd == job.run_dir
+    assert invocation.stdin_text is None
+
+    env = batch_research.child_environment(
+        "claude",
+        {
+            "KEEP_ME": "yes",
+            "ANTHROPIC_API_KEY": "metered",
+            "ANTHROPIC_AUTH_TOKEN": "gateway",
+            "ANTHROPIC_BASE_URL": "https://gateway.invalid",
+        },
+        skill_root=skill_root,
+        run_dir=job.run_dir,
+    )
+    assert env == {
+        "KEEP_ME": "yes",
+        "DEEPER_RESEARCH_SKILL_ROOT": str(skill_root),
+        "DEEPER_RESEARCH_RUN_DIR": str(job.run_dir),
+    }
+
+
+def test_run_batch_ramps_real_workers_and_keeps_outputs_isolated(tmp_path):
+    jobs = batch_research.prepare_jobs(
+        ["Question one", "Question two", "Question three", "Question four"],
+        tmp_path / "research",
+    )
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+
+    def worker_invocation(_adapter, job, _skill_root, _claude_runner=None):
+        return batch_research.Invocation(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import pathlib,time; time.sleep(0.12); "
+                    "pathlib.Path('RESEARCH-BIBLE.md').write_text('done')"
+                ),
+            ],
+            job.run_dir,
+            None,
+        )
+
+    result = batch_research.run_batch(
+        jobs,
+        adapter="codex",
+        skill_root=skill_root,
+        limit=batch_research.AdaptiveLimit(
+            initial=1,
+            maximum=3,
+            stability_window=0.03,
+            backoff_seconds=0.05,
+        ),
+        poll_interval=0.01,
+        invocation_builder=worker_invocation,
+        source_env={},
+    )
+
+    assert result.succeeded == 4
+    assert result.failed == 0
+    assert result.peak_running == 3
+    assert all((job.run_dir / "RESEARCH-BIBLE.md").read_text() == "done" for job in jobs)
+
+
+def test_run_batch_backs_off_after_capacity_failure_without_killing_active_work(tmp_path):
+    jobs = batch_research.prepare_jobs(
+        ["Saturate", "Already active", "Wait for cooldown"],
+        tmp_path / "research",
+    )
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+
+    def worker_invocation(_adapter, job, _skill_root, _claude_runner=None):
+        if job.question == "Saturate":
+            code = "import time; time.sleep(0.03); print('HTTP 429: too many requests'); raise SystemExit(1)"
+        elif job.question == "Already active":
+            code = (
+                "import pathlib,time; time.sleep(0.08); "
+                "pathlib.Path('RESEARCH-BIBLE.md').write_text('active survived')"
+            )
+        else:
+            code = "import pathlib; pathlib.Path('RESEARCH-BIBLE.md').write_text('after cooldown')"
+        return batch_research.Invocation([sys.executable, "-c", code], job.run_dir, None)
+
+    started = time.monotonic()
+    result = batch_research.run_batch(
+        jobs,
+        adapter="codex",
+        skill_root=skill_root,
+        limit=batch_research.AdaptiveLimit(
+            initial=2,
+            maximum=4,
+            stability_window=1,
+            backoff_seconds=0.12,
+        ),
+        poll_interval=0.01,
+        invocation_builder=worker_invocation,
+        source_env={},
+    )
+
+    assert result.saturation_events == 1
+    assert result.succeeded == 2
+    assert result.failed == 1
+    assert result.final_target == 1
+    assert time.monotonic() - started >= 0.12
+    assert (jobs[1].run_dir / "RESEARCH-BIBLE.md").read_text() == "active survived"
+
+
+def test_run_batch_does_not_reuse_stale_capacity_signals_from_an_old_log(tmp_path):
+    job = batch_research.prepare_jobs(["Ordinary failure"], tmp_path / "research")[0]
+    job.log_path.write_text("old attempt: HTTP 429 too many requests\n")
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+
+    def worker_invocation(_adapter, current_job, _skill_root, _claude_runner=None):
+        return batch_research.Invocation(
+            [sys.executable, "-c", "print('evidence gate failed'); raise SystemExit(22)"],
+            current_job.run_dir,
+            None,
+        )
+
+    result = batch_research.run_batch(
+        [job],
+        adapter="codex",
+        skill_root=skill_root,
+        limit=batch_research.AdaptiveLimit(
+            initial=1,
+            maximum=2,
+            stability_window=1,
+            backoff_seconds=0.05,
+        ),
+        poll_interval=0.01,
+        invocation_builder=worker_invocation,
+        source_env={},
+    )
+
+    assert result.failed == 1
+    assert result.saturation_events == 0
+
+
+def test_cli_dry_run_reports_default_policy_without_launching_workers(tmp_path, capsys):
+    questions = tmp_path / "questions.txt"
+    questions.write_text("Question one\nQuestion two\n")
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+
+    returncode = batch_research.main(
+        [
+            str(questions),
+            "--adapter",
+            "codex",
+            "--skill-root",
+            str(skill_root),
+            "--output-root",
+            str(tmp_path / "research"),
+            "--dry-run",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert returncode == 0
+    assert "adaptive concurrency: initial=2 maximum=8" in output
+    assert output.count("codex exec") == 2
+    assert not list(tmp_path.rglob("RESEARCH-BIBLE.md"))
