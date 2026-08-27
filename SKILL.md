@@ -17,6 +17,14 @@ a "Research Bible."
 
 There is ONE pipeline. No model fleet, no `mode` flag other than `slices`.
 
+## Runtime adapter (required at invocation)
+
+Read [references/runtime-adapters.md](references/runtime-adapters.md) before
+framing or dispatching work. Select one adapter for this run and follow its
+native questions, subagents, role-based model choice, batching, retainer path,
+subscription provider, and headless command. Do not mix Codex and Claude
+semantics in one run.
+
 ## Prerequisites
 
 **Exa key — required for retrieval:**
@@ -25,9 +33,9 @@ EXA_API_KEY          # Round-1 slices + Round-2.5 deep-reasoning (the retrieval 
 ```
 Without it, retrieval scripts exit `20`.
 
-**LLM keys — set whichever you have.** Reasoning rounds (synthesis, integration,
-adversary) run on the Claude Code session's own subagents first; the metered
-providers below are used when a script or subagent needs a direct API call:
+**LLM keys — set whichever you have.** Reasoning rounds use the selected
+adapter's native subagents first. Metered providers below are used only when a
+script or subagent needs a direct API call:
 ```
 ANTHROPIC_API_KEY    # Claude (synthesis / integration default)
 OPENAI_API_KEY       # ChatGPT (gpt-4.1)
@@ -52,7 +60,7 @@ pip install -r requirements.txt
 
 ```
 Round -1   FRAME            (default-on, skippable) coach the umbrella question +
-              ↓             sub-questions + scope before any spend — AskUserQuestion
+              ↓             sub-questions + scope before any spend — host-native questions
 Round 0    SCOPE            scope.py → scope.json (domain + source priorities)
               ↓
 Round 1    RETRIEVE         slice_search.py → Exa slices (full text) + academic anchor
@@ -87,7 +95,7 @@ sub-questions and scope. This is a SHORT structured dialog, not a wall of text.
 - The user passed a skip signal: `just go`, `skip framing`, `no framing`,
   `trust the model`, `--no-frame`, or similar.
 
-**When you run it, use ONE `AskUserQuestion` call with ≤3 questions:**
+**When you run it, use one host-supported interactive question flow with ≤3 questions:**
 
 1. **Umbrella question.** Restate the user's raw ask as a candidate umbrella
    question and offer it as the recommended option, plus 1-2 alternative framings
@@ -105,9 +113,9 @@ Then reflect the confirmed framing back in one line and proceed to Round 0,
 threading the umbrella question into `--topic` and the sub-questions + scope into
 `--scope`. Do NOT spend any retrieval budget before this reflection.
 
-If `AskUserQuestion` is unavailable (headless / cron / non-interactive run), skip
-Stage 0 silently and fall back to the raw topic: never block an unattended run
-waiting on input.
+If the host has no interactive-question mechanism, ask these in ordinary chat. In
+headless / cron / non-interactive runs, skip Stage 0 silently and fall back to the
+raw topic: never block an unattended run waiting on input.
 
 ## Round 0 — Scope
 
@@ -124,8 +132,8 @@ python3 scripts/scope.py \
 ```
 
 `--use-llm` resolves the provider via `config.pick_provider` on the `[defaults].utility`
-role (TOML), else the first available of `claude-sub`, `claude`, `chatgpt`, else any
-configured provider. `scope.py` writes both a markdown scope file and the sibling
+role (TOML), else the selected host subscription provider (`codex-sub` or
+`claude-sub`), then other configured providers. `scope.py` writes both a markdown scope file and the sibling
 `.json` used downstream. Domain and freshness *retrieval* controls live on
 `slice_search.py` (`--fresh-since`), not on `scope.py`.
 
@@ -304,9 +312,9 @@ Dispatch **one synthesis subagent** to read the entire Round-1 corpus (all
 `round1/slice_*.jsonl` + `brief_*.md` + the anchor) and produce a comparison. For any
 row with a `text_path`, **read that `round1/sources/<file>.txt` full-text file** and
 reason over the document itself — the highlights are only an index into it, not the
-evidence. It runs
-on the Claude Code session's own subagent (subscription, $0) when available, else on a
-metered Anthropic call bounded by `--max-cost-usd`.
+evidence. Use the selected adapter's native synthesis subagent (subscription-backed
+under Codex or Claude Code) when available, else a configured provider bounded by
+`--max-cost-usd`.
 
 **The synthesizer MUST emit these EXACT markdown headers** — `deepen_questions.py`
 parses them verbatim and a typo silently empties a bucket:
@@ -636,31 +644,26 @@ raise the cap, and `--resume`; never silently retry.
 
 Reasoning quality is not needed equally in every round, so do not run the whole
 pipeline on one top-tier model. Only two roles genuinely need the strongest model;
-the rest are bounded or mechanical and run well on a cheaper one. The Agent/subagent
-dispatch already accepts a `model:` override — use it **per role** instead of letting
-every subagent inherit the session model.
+the rest are bounded or mechanical and run well on a balanced/cheaper model. Use the
+selected adapter's role-based model mechanism instead of letting every subagent inherit
+the session model.
 
 **Default policy (the "Tier 1" hybrid — no quality regret):**
 
 | Role | Model | Why |
 |---|---|---|
-| **Synthesis (Round 2)** | strongest (e.g. `opus`) | Sets the field map + six-header frame the whole Bible inherits; a *single* call, so keeping it strong is cheap |
-| **Integration sections (Round 3)** | strongest (e.g. `opus`) | The narrative-explainer prose the reader actually reads, and the biggest token sink; faithful argument reconstruction matters |
-| Squad coverage audit (personas + checklist) | cheaper (e.g. `sonnet`) | Bounded gap-finding (≤5 gaps/lens); a checklist pass is mechanical |
-| Fix pass (apply adversary edits, Round 4) | cheaper (e.g. `sonnet`) | Mechanical corrections against a findings list |
-| Scope (Round 0), glue/orchestration | cheaper (e.g. `sonnet`) | Trivial classification / bookkeeping |
-| Refute adversary (Round 4) | **different family** (e.g. `gpt-5.1`) | Must differ from the synthesizer's family; unchanged by this policy |
+| **Synthesis (Round 2)** | strongest available | Sets the field map + six-header frame the whole Bible inherits; a *single* call, so keeping it strong is cheap |
+| **Integration sections (Round 3)** | strongest available | The narrative-explainer prose the reader actually reads, and the biggest token sink; faithful argument reconstruction matters |
+| Squad coverage audit (personas + checklist) | balanced/cheaper | Bounded gap-finding (≤5 gaps/lens); a checklist pass is mechanical |
+| Fix pass (apply adversary edits, Round 4) | balanced/cheaper | Mechanical corrections against a findings list |
+| Scope (Round 0), glue/orchestration | balanced/cheaper | Trivial classification / bookkeeping |
+| Refute adversary (Round 4) | **different family** | Must differ from the actual synthesizer's family; unchanged by this policy |
 
-**How to apply it:** set the *session* model to the cheaper model (the glue default),
-then dispatch the synthesis and integration subagents with an explicit
-`model: <strongest>` override. In a headless run (`claude -p --model sonnet …`) the
-orchestrator MUST bump those two roles up per this table — the launch prompt should say
-so explicitly, since a headless instance follows instructions rather than re-deriving
-this. Rough effect vs. all-strongest: ≈20–25% cheaper with prose quality fully
-preserved (only squad + fix-pass + glue move down). A more aggressive tier that also
-runs *integration* on the cheaper model saves ≈60–70% but flattens the prose and leaves
-more overclaims for the adversary/fix pass to clean up — use it only for exploratory
-first-pass breadth, then re-run the winners with integration on the strongest model.
+**How to apply it:** keep orchestration on the selected adapter's balanced/cheaper
+role, then elevate synthesis and integration to its strongest available role. State
+that role policy explicitly in a headless prompt. The adapter may show valid
+host-specific aliases, but the policy is role-based: do not hardcode one vendor's
+model names into a cross-runtime run.
 
 ## No-WebFetch rule (applies to every subagent in this pipeline)
 
@@ -688,13 +691,12 @@ Four built-in provider families:
 | `grok` (xAI) | `xai` |
 
 TOML providers set their own `family` (default `"other"`). **The adversary must differ
-in family from the synthesizer** (which runs on `anthropic`) so its refutation is
-independent. `config.load_run_config()` resolves it: it walks the configured `adversary`
-chain (default `["grok", "chatgpt", "gemini"]`), skips entries that name no configured
-provider, and returns the first available provider whose family ≠ `anthropic`. If none
-qualify it emits `adversary_warning` and falls back to the synthesizer's own provider —
-configure any non-anthropic provider (or a `cli` one) for a genuinely independent
-adversary.
+in family from the actual synthesizer** so its refutation is independent.
+`config.load_run_config()` walks the configured `adversary` chain (default
+`["grok", "chatgpt", "gemini"]`), skips unavailable and same-family providers, and
+returns the first available different-family provider. If none qualify, independent
+review is fail-closed: surface the missing provider and stop before claiming it, or
+label any same-family critique as non-independent.
 
 ## Provider/Agent Config (TOML)
 
@@ -722,7 +724,9 @@ TOML paths are gitignored.
 A provider can run a local CLI (`claude -p`, `codex exec`) authenticated via your SSO
 subscription (Claude Pro/Max, ChatGPT) — no per-token cost. `call_cli` scrubs
 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` from the subprocess env so the CLI uses
-subscription auth. To let a `claude` cli provider search the live web:
+subscription auth. `codex-sub` uses `codex exec --ephemeral --sandbox read-only
+--skip-git-repo-check -` for text-only direct calls; the prompt is sent on standard
+input. To let a `claude` cli provider search the live web:
 
 ```toml
 [providers.claude-sub]
@@ -748,37 +752,55 @@ enables Bash/Edit/Write in your cwd — avoid it for unattended subprocesses.
 
 You do NOT have to open a session per question. Point the pipeline at **a list of
 questions** — a chapter of research questions, a file with one question per line, or any
-set of sub-questions — and fan out **one headless `claude -p` session per question, in
-parallel**, each running the full pipeline into its own run dir. Every session is fully
-isolated (its own context, its own Exa ledger, its own `research/<slug>/` folder), so
-they don't interfere; a concurrency cap keeps you under API/Exa rate limits.
+set of sub-questions — and fan out one selected-adapter session per question. Every
+session is fully isolated (its own context, Exa ledger, and `research/<slug>/` folder),
+so they do not interfere. Cap concurrency to available host slots and API/Exa limits.
 
-**The general recipe** (loop your questions → launch capped background sessions):
+**Codex recipe** (use Codex headless sessions):
 
 ```bash
-CONC=3                                   # how many to run at once
+CONC=3                                   # never exceed available Codex slots
 while IFS= read -r q; do
   slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
   dir="research/$slug"; mkdir -p "$dir"
   [ -f "$dir/RESEARCH-BIBLE.md" ] && { echo "skip $slug"; continue; }   # resumable
-  ( claude -p --dangerously-skip-permissions --model sonnet \
-      "Use the deeper-research skill to run the FULL pipeline for this question and \
-write RESEARCH-BIBLE.md into the run dir $dir. Apply the Tier 1 model policy: dispatch \
-the synthesis and integration subagents with model:opus, everything else on sonnet. \
-Source ~/.env first. Headless: skip Stage-0 framing. QUESTION: $q" \
+  ( printf '%s\n' "Use the deeper-research skill to run the FULL pipeline for this question and \
+write RESEARCH-BIBLE.md into the run dir $dir. Use Codex native subagents; synthesis \
+and integration use the strongest available role, bounded roles use balanced/cheaper. \
+Headless: skip Stage-0 framing. QUESTION: $q" | \
+    codex exec --ephemeral --skip-git-repo-check - \
   ) > "research/_batch/logs/$slug.log" 2>&1 &
   while [ "$(jobs -rp | wc -l)" -ge "$CONC" ]; do sleep 5; done   # throttle
 done < questions.txt
 wait
 ```
 
-Notes that make a batch behave:
-- **`--dangerously-skip-permissions`** is what lets each session run bash/Exa/curl
-  unattended; scope it to a research working dir. (The No-WebFetch rule still holds.)
-- **Concurrency 3–4** is usually right — more just queues behind API/Exa rate limits.
+**Claude recipe** (same isolation and throttling, with Claude native agents):
+
+```bash
+CONC=3
+while IFS= read -r q; do
+  slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
+  dir="research/$slug"; mkdir -p "$dir"
+  [ -f "$dir/RESEARCH-BIBLE.md" ] && continue
+  ( claude -p --dangerously-skip-permissions \
+      "Use the deeper-research skill to run the FULL pipeline for this question and \
+write RESEARCH-BIBLE.md into $dir. Use Claude native Agent subagents and the \
+role-based model policy: strongest available for synthesis/integration, balanced for \
+bounded roles. Headless: skip Stage-0 framing. QUESTION: $q" \
+  ) > "research/_batch/logs/$slug.log" 2>&1 &
+  while [ "$(jobs -rp | wc -l)" -ge "$CONC" ]; do sleep 5; done
+done < questions.txt
+wait
+```
+
+Notes that make either batch behave:
+- **Permissions:** grant a full-pipeline session only the access needed for its own
+  research directory. The `codex-sub` direct text-call form remains read-only; Claude
+  tool permissions stay least-privilege. (The No-WebFetch rule still holds.)
+- **Concurrency:** batch rather than exceeding the host's available slots.
 - **Resumable:** skip any question whose run dir already has `RESEARCH-BIBLE.md`.
-- **Model:** launch with `--model sonnet` (the glue default) and instruct per-role Opus
-  for synthesis + integration — see *Model selection by role* above.
+- **Model:** state the role-based policy; do not hardcode Claude aliases in Codex runs.
 - **Monitor:** `tail -f research/_batch/logs/*.log` or
   `watch 'find research -name RESEARCH-BIBLE.md | wc -l'`.
 - **Cost scales linearly:** each question ≈ its own retrieval ledger (~$0.5–0.8 Exa) plus
@@ -809,17 +831,18 @@ python3 scripts/deepen_questions.py --run-dir "$RUN" --round2-file "$RUN/round2/
 # → Round 3 integration → sections/ → Round 4:
 python3 scripts/verify_citations.py "$RUN/sections/" --output "$RUN/round4/citation-verification.md" --check-urls
 python3 scripts/lint_background.py "$RUN/sections/"      # numeric tripwire inside fenced editorial blocks
-# → refute adversary (non-anthropic family) → fix pass → export.
+# → refute adversary (different from actual synthesizer family) → fix pass → export.
 ```
 
 ## Execution Checklist
 
 When `/deeper-research [topic]` is invoked:
 
-0. **Stage 0 framing** — unless the ask is already well-framed or the user passed a
-   skip signal, run ONE `AskUserQuestion` (≤3 questions: umbrella question,
-   sub-questions, scope dials); reflect the confirmed framing back before any spend.
-   Skip silently in headless/non-interactive runs.
+0. **Runtime + Stage 0 framing** — read `references/runtime-adapters.md`, select one
+   adapter, then unless the ask is already well-framed or the user passed a skip
+   signal, use its host-supported interactive flow (≤3 questions: umbrella question,
+   sub-questions, scope dials). Fall back to ordinary chat when interactive questions
+   are unavailable; skip silently in headless/non-interactive runs.
 1. **Round 0** — `scope.py`; capture `scope.json`.
 2. **Round 1 retrieve** — run `dispatch.py` to print the runnable sequence, then
    `slice_search.py`.
@@ -831,7 +854,8 @@ When `/deeper-research [topic]` is invoked:
    as if expansion succeeded.
 5. **Coverage audit (DEFAULT: the bundled squad procedure):** follow `references/squad-audit.md`
    on this run dir — checklist + sibling sweep + persona panel + per-gap adversarial verify (you
-   dispatch the persona subagents inline), then fills via `slice_search.py --add-slice`, re-gate.
+   dispatch the selected adapter's isolated persona subagents inline, batching within
+   available host slots), then fills via `slice_search.py --add-slice`, re-gate.
    Writes the same `round1/coverage_gaps.md`. FALLBACK (no subagents available):
    `coverage_audit.py --run-dir … --topic …`. Never run both.
    **Then repeat `fetch_fulltext.py --run-dir …`** — a SECOND full-text pass so the
@@ -844,7 +868,8 @@ When `/deeper-research [topic]` is invoked:
    + round2.5 answers; planners + parallel section subagents + `dedup_bib.py`; assemble + audit.
 9. **Round 4** — `verify_citations.py --check-urls` (+ `classify_sources.py`,
    `lit_search.py --compare-bib`) → `lint_background.py research/[slug]/sections/`
-   (fix/re-fence flagged blocks) → refute adversary (non-anthropic family) → fix pass.
+   (fix/re-fence flagged blocks) → refute adversary (different from actual synthesizer
+   family) → fix pass. Do not claim independent review if no such provider is available.
    Wrap the verifier in the stall watchdog: `python3 scripts/watched.py --stale-secs 300 -- python3 scripts/verify_citations.py …`.
 10. **Round 5 (optional)** — `slice_search --only-slice` / `deepen --single-question`; re-integrate.
 11. **Export** — `export.py`, then `search.py index`.
@@ -859,7 +884,7 @@ When `/deeper-research [topic]` is invoked:
 | Silent bucket loss in deepening | Round 2 MUST emit the six EXACT headers (a typo empties a bucket) |
 | Fabricated / unresolvable citations | `verify_citations.py` resolves every cite against OpenAlex/Crossref |
 | Dead or spoofed links | Three-state SSRF-hardened probe → `## ⚠ Unresolved links` |
-| Echo-chamber review | Adversary forced onto a non-anthropic family |
+| Echo-chamber review | Adversary forced onto a family different from the actual synthesizer |
 | Bibliography skewed to blogs/wikis | `classify_sources.py` quality score |
 | Major canonical works missing | `lit_search.py --compare-bib` |
 | Partial retrieval failure | `slice_search.py --resume` skips slices whose jsonl parses |

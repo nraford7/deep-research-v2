@@ -1,0 +1,6 @@
+interface:
+  display_name: "Deeper Research"
+  short_description: "Retrieval-first, evidence-gated deep research"
+  default_prompt: "Use $deeper-research to produce a deeply sourced research bible on this topic."
+policy:
+  allow_implicit_invocation: true

@@ -1,6 +1,6 @@
 # deeper-research
 
-Retrieval-first deep research for Claude Code. It scopes a topic, fetches a real evidence corpus with Exa search slices, and reasons only over what it found, producing a fact-checked, fully-cited "Research Bible" plus BibTeX and a machine-readable claims file. A hard evidence gate refuses thin material, and an independent adversary tries to refute the draft before you trust it.
+Retrieval-first deep research for Codex and Claude Code. It scopes a topic, fetches a real evidence corpus with Exa search slices, and reasons only over what it found, producing a fact-checked, fully-cited "Research Bible" plus BibTeX and a machine-readable claims file. A hard evidence gate refuses thin material, and an independent adversary tries to refute the draft before you trust it.
 
 ## What it does
 
@@ -33,7 +33,7 @@ So we rebuilt it from the ground up around a different first principle: **fetch 
 
 ### What stayed the same
 
-Both are Claude Code slash-command skills, and both produce the same deliverable (a fact-checked, fully-cited "Research Bible" plus BibTeX and a machine-readable claims file) through the same later-stage machinery:
+The shared skill runs natively in Codex and Claude Code, producing the same deliverable (a fact-checked, fully-cited "Research Bible" plus BibTeX and a machine-readable claims file) through the same later-stage machinery:
 
 - Round 0 domain scoping that injects source priorities per field
 - Mechanical citation verification against OpenAlex and Crossref (free, no key)
@@ -77,24 +77,34 @@ See `SKILL.md` for the full architecture, prompt templates, and failure modes.
 ## Install
 
 ```bash
-# 1. Clone into your Claude skills directory
-git clone https://github.com/nraford7/deeper-research.git ~/.claude/skills/deeper-research
+# 1. Keep one canonical clone shared by both runtimes
+git clone https://github.com/nraford7/deeper-research.git /Users/noahraford/Projects/deeper-research
 
-# 2. Install Python deps
-pip install -r ~/.claude/skills/deeper-research/requirements.txt
+# 2. Expose that exact clone to both skill discovery locations
+ln -s /Users/noahraford/Projects/deeper-research ~/.agents/skills/deeper-research
+ln -s /Users/noahraford/Projects/deeper-research ~/.claude/skills/deeper-research
 
-# 3. Set whichever API keys you have
-cp ~/.claude/skills/deeper-research/.env.example ~/.env
+# 3. Install Python dependencies once
+pip install -r /Users/noahraford/Projects/deeper-research/requirements.txt
+
+# 4. Set whichever API keys you have
+cp /Users/noahraford/Projects/deeper-research/.env.example ~/.env
 # edit ~/.env and fill in keys
 
-# 4. (Optional) Enable bundled semantic search over your research
-pip install -r ~/.claude/skills/deeper-research/requirements-search.txt
+# 5. (Optional) Enable bundled semantic search over your research
+pip install -r /Users/noahraford/Projects/deeper-research/requirements-search.txt
 # needs OPENAI_API_KEY; without this step search just skips gracefully
 ```
 
-Retrieval needs `EXA_API_KEY`. The skill auto-detects which LLM keys are set and only calls providers you've configured; a missing LLM key just narrows the reasoning options — synthesis and integration prefer the Claude Code session's own $0 subagent when available.
+Retrieval needs `EXA_API_KEY`. The skill auto-detects configured LLM providers; a missing LLM key narrows direct-call options. Under Codex or Claude Code, synthesis and integration prefer that host's native subscription-backed subagents.
 
 ## Use
+
+In Codex:
+
+```
+$deeper-research [your topic and scope]
+```
 
 In Claude Code:
 
@@ -197,46 +207,64 @@ whole pipeline on one model (the **Tier 1 hybrid**):
 
 | Role | Model |
 |---|---|
-| Synthesis (Round 2) | strong, e.g. `opus` — sets the field-map frame; a single call |
-| Integration sections (Round 3) | strong, e.g. `opus` — the prose you read, and the biggest token sink |
-| Squad audit, fix-pass, scoping, glue | cheap, e.g. `sonnet` |
-| Refute adversary (Round 4) | different family, e.g. `gpt-5.1` — unchanged |
+| Synthesis (Round 2) | strongest available — sets the field-map frame; a single call |
+| Integration sections (Round 3) | strongest available — the prose you read, and the biggest token sink |
+| Squad audit, fix-pass, scoping, glue | balanced/cheaper |
+| Refute adversary (Round 4) | family different from the actual synthesizer |
 
-Run the session on the cheap model and bump synthesis + integration up to the strong
-one. Effect vs. all-strong: ≈20–25% cheaper with prose quality preserved. An aggressive
-variant that also runs integration on the cheap model saves ≈60–70% but flattens the
-prose — use it for first-pass breadth, then re-run the winners. Full table and the
-apply-in-headless note: *Model selection by role* in `SKILL.md`.
+Use the active runtime's balanced/cheaper role for orchestration and elevate synthesis +
+integration to its strongest available role. Codex and Claude aliases remain
+host-specific; the shared policy never assumes one vendor's names. Full table and the
+headless note: *Model selection by role* in `SKILL.md`.
 
 ## Batch: parallel headless runs over many questions
 
 You don't need a session per question. Point the pipeline at a **list of questions** —
-a chapter of research questions, or a file with one question per line — and fan out
-**one headless `claude -p` session per question, in parallel**. Each is fully isolated
-(its own context, its own Exa ledger, its own `research/<slug>/` folder), concurrency-
-capped to stay under API/Exa rate limits. General recipe:
+a chapter of research questions, or a file with one question per line — and fan out one
+headless session per question. Each is fully isolated (its own context, Exa ledger, and
+`research/<slug>/` folder), capped to available host slots and API/Exa limits.
+
+Codex batch recipe:
 
 ```bash
-CONC=3                                   # how many at once
+CONC=3                                   # never exceed available Codex slots
 while IFS= read -r q; do
   slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
   dir="research/$slug"; mkdir -p "$dir"
   [ -f "$dir/RESEARCH-BIBLE.md" ] && continue                    # resumable: skip done
-  ( claude -p --dangerously-skip-permissions --model sonnet \
-      "Use the deeper-research skill: run the FULL pipeline for this question, write \
-RESEARCH-BIBLE.md into $dir, and dispatch synthesis+integration on model:opus. \
-Source ~/.env first. Headless: skip Stage-0 framing. QUESTION: $q" \
+  ( printf '%s\n' "Use the deeper-research skill: run the FULL pipeline for this question, write \
+RESEARCH-BIBLE.md into $dir. Use Codex native subagents and role-based model choices. \
+Headless: skip Stage-0 framing. QUESTION: $q" | \
+    codex exec --ephemeral --skip-git-repo-check - \
   ) > "research/_batch/logs/$slug.log" 2>&1 &
   while [ "$(jobs -rp | wc -l)" -ge "$CONC" ]; do sleep 5; done  # throttle
 done < questions.txt
 wait
 ```
 
-`--dangerously-skip-permissions` lets each session run bash/Exa/curl unattended (the
-No-WebFetch rule still holds); skip any question whose folder already has a Bible
-(resumable); cost scales linearly (~$0.5–0.8 Exa/question plus its LLM legs). Monitor
-with `tail -f research/_batch/logs/*.log`. Full notes and knobs: *Batch: parallel
-headless runs over many questions* in `SKILL.md`.
+Claude batch recipe:
+
+```bash
+CONC=3
+while IFS= read -r q; do
+  slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
+  dir="research/$slug"; mkdir -p "$dir"
+  [ -f "$dir/RESEARCH-BIBLE.md" ] && continue
+  ( claude -p --dangerously-skip-permissions \
+      "Use the deeper-research skill: run the FULL pipeline for this question, write \
+RESEARCH-BIBLE.md into $dir. Use Claude native Agent subagents and role-based model \
+choices. Headless: skip Stage-0 framing. QUESTION: $q" \
+  ) > "research/_batch/logs/$slug.log" 2>&1 &
+  while [ "$(jobs -rp | wc -l)" -ge "$CONC" ]; do sleep 5; done
+done < questions.txt
+wait
+```
+
+Grant each full-pipeline session only the access needed for its own research directory
+(the No-WebFetch rule still holds). Batch rather than exceeding available slots; skip
+run directories that already contain a Bible. Cost scales linearly (~$0.5–0.8 Exa per
+question plus LLM legs). Full notes: *Batch: parallel headless runs over many questions*
+in `SKILL.md`.
 
 ## API keys
 
@@ -256,7 +284,7 @@ Providers can also be defined in TOML for arbitrary OpenAI-compatible endpoints 
 
 `config.py` is the single control point for provider resolution in the shipped scripts (Round 0 + Round 1). The optional `[defaults]` TOML table lets you name a provider for one-off calls: `[defaults].utility` controls which provider `scope.py --use-llm` uses for Round 0 scoping — including a subscription provider at $0 per call — instead of a hardcoded API key.
 
-Providers can also be local CLI tools (`api_type = "cli"`) — for example `claude -p` or `codex exec` — which authenticate via your SSO subscription (Claude Pro/Max, ChatGPT) with no per-token API cost. To enable live web search on a `claude` cli provider, set `extra_args = ["--allowedTools", "WebSearch", "Bash(curl:*)"]` (search + curl-only fetching; no Edit/Write, no other shell commands — WebFetch is banned pipeline-wide because it returns an AI summary of the page rather than the raw text) and add `capabilities = ["web_search"]` — this makes it eligible for the `real-time` agent type at **$0 API cost**. `--dangerously-skip-permissions` also works but additionally enables Bash/Edit/Write; avoid it for unattended subprocesses. See `config.toml.example` for the full syntax and a diverse multi-provider example.
+Providers can also be local CLI tools (`api_type = "cli"`) — `codex-sub` and `claude-sub` are auto-detected when the matching host CLI is installed, and explicit TOML entries may override either. `codex-sub` uses a text-only `codex exec` call with `--ephemeral`, `--sandbox read-only`, and `--skip-git-repo-check`; Claude uses `claude -p` with least-privilege tools. To enable live web search on a Claude CLI provider, set `extra_args = ["--allowedTools", "WebSearch", "Bash(curl:*)"]` (search + curl-only fetching; no Edit/Write, no other shell commands — WebFetch is banned pipeline-wide because it returns an AI summary of the page rather than raw text) and add `capabilities = ["web_search"]`. `--dangerously-skip-permissions` also enables Bash/Edit/Write; avoid it for unattended subprocesses. See `config.toml.example` for the full syntax and host-specific examples.
 
 > **OpenRouter vs direct APIs:** OpenRouter's value is reaching model lineages you can't get direct (Kimi, GLM, Microsoft, etc.). For models available direct (DeepSeek, Anthropic), the provider's own API is cheaper. All are `api_type = "openai"` providers with a `base_url`.
 
@@ -340,9 +368,8 @@ Hardening from a large real run (a ~28k-word, 130+-source Research Bible):
   common scholarly/trade imprints) — so a scholarly corpus no longer scores as low-tier.
 - **`lit_search.py` null-safety.** Guards a null OpenAlex `primary_location.source` that raised
   `AttributeError` and aborted the missing-literature check.
-- **Stale default model ID.** The built-in `claude` provider's retired
-  `claude-opus-4-20250514` (now 404) is updated to a current Opus. Model IDs still drift —
-  override per provider in TOML.
+- **Stale model ID.** Provider model identifiers drift and can retire. Verify the
+  current ID or host alias, then override that provider in TOML if needed.
 
 ## License
 
@@ -350,4 +377,4 @@ MIT — see `LICENSE`.
 
 ## Credits
 
-Built for use inside Claude Code as a slash-command skill. Adapt freely.
+Built for use inside Codex and Claude Code as a shared skill. Adapt freely.

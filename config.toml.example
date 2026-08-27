@@ -24,7 +24,7 @@ model      = "deepseek-v4-pro"             # also deepseek-v4-flash (cheaper); l
 max_tokens = 32768
 pricing    = { in = 0.55, out = 2.19 }
 family     = "other"                        # model lineage; drives adversary selection
-                                            # (adversary must differ from the anthropic synthesizer)
+                                            # (must differ from the actual synthesizer)
 
 # OpenRouter — best for reaching model lineages you can't get direct
 # (Kimi/GLM/Microsoft etc). Not the cheapest path for DeepSeek or Anthropic.
@@ -45,7 +45,19 @@ model      = "accounts/fireworks/models/glm-5p1"   # verify current id at firewo
 max_tokens = 32768
 family     = "other"
 
-# Web-enabled subscription provider — live web search at $0 API cost
+# Subscription providers are auto-detected when the matching host CLI is available:
+# Codex adds `codex-sub`; Claude Code adds `claude-sub`. The declarations below are
+# optional overrides (for example, to add model/tool settings). Do not set a
+# `[defaults]` provider unless you deliberately want to override host preference.
+
+# Codex subscription provider — direct text calls use hardened `codex exec` with an
+# ephemeral, read-only sandbox. Native Codex subagents handle orchestration.
+[providers.codex-sub]
+api_type = "cli"
+command  = "codex"
+family   = "openai"
+
+# Claude subscription provider — live web search at $0 API cost
 # claude -p blocks tools by default; --allowedTools WebSearch Bash(curl:*) opts in
 # to search + curl-only fetching (no Edit/Write, no other shell commands).
 # NO WebFetch: it returns an AI summary of the page, not the page — curl the raw
@@ -56,19 +68,17 @@ family     = "other"
 [providers.claude-sub]
 api_type     = "cli"
 command      = "claude"
-# model      = "claude-opus-4-20250514"           # optional; omit to use CLI default
+# model      = "<current Claude alias or ID>"       # optional; omit to use CLI default
 extra_args   = ["--allowedTools", "WebSearch", "Bash(curl:*)"]
 capabilities = ["web_search"]                     # marks it real-time-eligible
 family       = "anthropic"                         # same lineage as the metered `claude` built-in;
-                                                    # adversary selection SKIPS anthropic providers
+                                                    # same-family adversaries are skipped
 
-# One-off calls (Round 0 scoping, future synthesis) — pick a cheap/subscription
-# provider. Avoid a metered web-search provider here: its per-search cost is wasted
-# on the trivial JSON call scope.py makes.
-[defaults]
-utility = "claude-sub"     # provider for one-off calls (scoping). Falls back to
-                           # claude-sub → claude → chatgpt → any available provider.
-# synthesis = "claude-sub" # reserved for future reasoning/synthesis rounds
+# One-off calls (Round 0 scoping, future synthesis) — active-host subscription
+# preference applies automatically. Uncomment only to make an explicit override.
+# [defaults]
+# utility = "codex-sub"    # or "claude-sub"; explicit defaults win over auto-detection
+# synthesis = "codex-sub"
 
 # ---------------------------------------------------------------------------
 # Run configuration (Round-1 retrieval + adversary). All keys optional — omit
@@ -80,11 +90,10 @@ utility = "claude-sub"     # provider for one-off calls (scoping). Falls back to
 # min_evidence_total  = 10         # gate: minimum globally-unique evidence items
 # min_nonempty_slices = 2          # gate: minimum slices that returned ≥1 item
 # adversary           = ["grok", "chatgpt", "gemini"]  # walked in order; the first
-#                                  # CONFIGURED + available provider whose family is
-#                                  # NOT "anthropic" becomes the adversary. If none
-#                                  # qualify, it falls back to the anthropic synthesizer
-#                                  # (with a warning) — configure a non-anthropic
-#                                  # provider for an independent adversary.
+#                                  # configured + available provider whose family differs
+#                                  # from the ACTUAL synthesizer becomes the adversary. If
+#                                  # none qualify, independent review is fail-closed: do
+#                                  # not report it as satisfied; configure a different-family provider.
 
 # ---------------------------------------------------------------------------
 # Round-1 slice roster. Omit all [slices.*] tables to accept the 5-slice code
@@ -116,18 +125,14 @@ utility = "claude-sub"     # provider for one-off calls (scoping). Falls back to
 # include_domains = ["substack.com", "medium.com"]
 # enabled         = false
 
-# Agent mappings — deliberate diverse spread across model lineages.
-# Built-in defaults are used for any agent not listed here.
-[agents.academic]
-provider = "claude-sub"    # subscription — free; strong long-form analytical synthesis
+# Agent mappings — deliberate diverse spread across model lineages. Built-in defaults
+# apply when omitted; choose `codex-sub` in Codex or `claude-sub` in Claude Code only
+# when deliberately overriding the automatic active-host selection.
+# [agents.academic]
+# provider = "codex-sub"
 
-[agents.practitioner]
-# uses built-in chatgpt default if OPENAI_API_KEY is set
-
-[agents.real-time]
-provider = "claude-sub"    # free web search via subscription — the $0 way to give the
-                            # real-time agent live search (Round-1 retrieval itself is
-                            # Exa slices, so this agent is a supplement, not the anchor)
+# [agents.real-time]
+# provider = "claude-sub"  # Claude-only web-search opt-in; retrieval remains Exa
 
 [agents.grey-literature]
 provider = "deepseek"
@@ -139,6 +144,11 @@ provider = "kimi"
 # EXAMPLE B: minimal cli-only setup (subscription, no API keys needed)
 # ---------------------------------------------------------------------------
 
+# [providers.codex-sub]
+# api_type = "cli"
+# command  = "codex"
+# family   = "openai"
+
 # [providers.claude-sub]
 # api_type = "cli"
 # command  = "claude"
@@ -146,7 +156,7 @@ provider = "kimi"
 # capabilities = ["web_search"]
 
 # [agents.academic]
-# provider = "claude-sub"
+# provider = "codex-sub"  # use `claude-sub` when the active host is Claude Code
 
 # [agents.real-time]
 # provider = "claude-sub"
