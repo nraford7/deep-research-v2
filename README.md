@@ -267,9 +267,7 @@ while IFS= read -r q; do
   slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
   dir="$(pwd)/research/$slug"; mkdir -p "$dir"
   [ -f "$dir/RESEARCH-BIBLE.md" ] && continue
-  ( cd "$dir" && claude -p --allowedTools Agent Read Edit Write WebSearch \
-      "Bash(python3 $SKILL_ROOT/dispatch.py:*)" "Bash(python3 $SKILL_ROOT/scripts/*:*)" 'Bash(curl:*)' \
-      "Use the deeper-research skill rooted at $SKILL_ROOT to run the FULL pipeline for this question. \
+  ( cd "$dir" && claude -p "Use the deeper-research skill rooted at $SKILL_ROOT to run the FULL pipeline for this question. \
 Invoke every helper and dispatcher by its absolute path under $SKILL_ROOT (for example, \
 python3 $SKILL_ROOT/dispatch.py and python3 $SKILL_ROOT/scripts/<helper>.py); keep all \
 outputs under the writable run dir $dir and never write under $SKILL_ROOT. Use Claude native \
@@ -277,6 +275,8 @@ Agent subagents for coverage, integration, and fixes. For Round 2, honor an expl
 [defaults].synthesis executor; otherwise use a native strongest-available Agent subagent. Use \
 the strongest available role for integration and balanced roles for bounded work. \
 Headless: skip Stage-0 framing. QUESTION: $q" \
+      --allowedTools Agent Read Edit Write WebSearch \
+      "Bash(python3 $SKILL_ROOT/dispatch.py:*)" "Bash(python3 $SKILL_ROOT/scripts/*:*)" 'Bash(curl:*)' \
   ) > "research/_batch/logs/$slug.log" 2>&1 &
   while [ "$(jobs -rp | wc -l)" -ge "$CONC" ]; do sleep 5; done
 done < questions.txt
