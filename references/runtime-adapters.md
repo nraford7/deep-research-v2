@@ -101,6 +101,12 @@ fixed shell fan-out. Its adaptive target starts at two, adds one after each heal
 pressure or HTTP 429. Backoff delays only new launches: active work is never killed, and
 ordinary research failures are never retried automatically. Completed Bibles are skipped.
 
+The target project's launch directory is the default output root. It receives each run
+folder and `_batch/logs/`. If the user names a destination, use it instead. When the
+current working directory is not the target project directory, pass that destination as
+an absolute `--output-root`; never write runs under the installed skill or an unrelated
+agent workspace. Wait for all writers to exit before relocating a run directory.
+
 The `DEEPER_RESEARCH_SKILL_ROOT` environment override points to the installed skill;
 otherwise the runner selects `~/.agents/skills/deeper-research` for Codex or
 `~/.claude/skills/deeper-research` for Claude. Codex workers set the isolated run directory

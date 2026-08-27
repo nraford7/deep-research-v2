@@ -795,8 +795,18 @@ documented in the headless batch recipe; do not use broad permission bypasses.
 You do NOT have to open a session per question. Point the pipeline at **a list of
 questions** — a chapter of research questions, a file with one question per line, or any
 set of sub-questions — and fan out one selected-adapter session per question. Every
-session is fully isolated (its own context, Exa ledger, and `research/<slug>/` folder),
+session is fully isolated (its own context, Exa ledger, and `<launch-dir>/<slug>/` folder),
 so they do not interfere. Cap concurrency to available host slots and API/Exa limits.
+
+### Output location is the target project's launch directory
+
+Before dispatch, identify the directory the research is being launched in or for. Save
+every run folder plus `_batch/` metadata and logs directly under that directory. If the
+user names an output directory, that directory wins; otherwise use the batch process's
+current working directory. Pass an absolute `--output-root` whenever the active shell or
+agent workspace is not the target project directory. Never default to the skill install
+directory or an unrelated Codex/Claude workspace. Do not relocate active run directories;
+wait until their writers exit.
 
 Use `scripts/batch_research.py`; do not replace it with a fixed-concurrency shell loop.
 Each input line may be a question or `existing-slug<TAB>question` when resuming named
@@ -804,8 +814,9 @@ run directories. The default policy starts at two workers, adds one after each h
 60-second window, and caps at eight:
 
 ```bash
+cd /absolute/path/to/project/research
 python3 "$HOME/.agents/skills/deeper-research/scripts/batch_research.py" \
-  questions.txt --adapter codex --output-root research
+  questions.txt --adapter codex
 ```
 
 When a failed worker reports capacity/concurrency pressure or HTTP 429, the scheduler
@@ -819,7 +830,7 @@ For Claude, pass a pre-approved containment wrapper:
 
 ```bash
 python3 "$HOME/.claude/skills/deeper-research/scripts/batch_research.py" \
-  questions.txt --adapter claude --output-root research \
+  questions.txt --adapter claude \
   --claude-runner "/absolute/path/to/contained-runner"
 ```
 
@@ -827,7 +838,7 @@ The wrapper receives the complete Claude command plus `DEEPER_RESEARCH_SKILL_ROO
 `DEEPER_RESEARCH_RUN_DIR`; it must mount the former read-only and make only the latter
 writable. `--allowedTools` alone does not path-scope writes. Codex workers enforce `-C`
 to the run directory with `--sandbox workspace-write`. Monitor
-`research/_batch/logs/*.log`. Cost scales linearly: adaptive scheduling changes
+`<launch-dir>/_batch/logs/*.log`. Cost scales linearly: adaptive scheduling changes
 throughput, not the per-question Exa/model spend or any evidence gate.
 
 ## Benchmark quickstart

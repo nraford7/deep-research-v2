@@ -319,7 +319,15 @@ def _parser():
         help="UTF-8 file with question or explicit-slug<TAB>question per line",
     )
     parser.add_argument("--adapter", choices=("codex", "claude"), required=True)
-    parser.add_argument("--output-root", type=Path, default=Path("research"))
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path.cwd(),
+        help=(
+            "directory that receives run folders and _batch logs "
+            "(default: project launch directory)"
+        ),
+    )
     parser.add_argument("--skill-root", type=Path)
     parser.add_argument("--initial-concurrency", type=int, default=2)
     parser.add_argument("--max-concurrency", type=int, default=8)

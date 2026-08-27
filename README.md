@@ -227,15 +227,22 @@ Full table and the headless note: *Model selection by role* in `SKILL.md`.
 You don't need a session per question. Point the pipeline at a **list of questions** —
 a chapter of research questions, or a file with one question per line — and fan out one
 headless session per question. Each is fully isolated (its own context, Exa ledger, and
-`research/<slug>/` folder), bounded by an operator-set ceiling and responsive to
+`<launch-dir>/<slug>/` folder), bounded by an operator-set ceiling and responsive to
 observed host or API capacity pressure.
+
+Run the scheduler from the target project's research directory. That launch directory is
+the default output root for run folders and `_batch/` logs. A user-specified destination
+overrides it; when launching from elsewhere, pass that destination as an absolute
+`--output-root`. Runs never default to the skill install directory or an unrelated agent
+workspace.
 
 Use the tested adaptive runner instead of hand-tuning a fixed shell fan-out. It starts
 at two workers, adds one worker after each healthy 60-second window, and stops at eight:
 
 ```bash
+cd /absolute/path/to/project/research
 python3 "$HOME/.agents/skills/deeper-research/scripts/batch_research.py" \
-  questions.txt --adapter codex --output-root research
+  questions.txt --adapter codex
 ```
 
 On a failed worker that reports a capacity/concurrency error or HTTP 429, the runner
@@ -251,13 +258,13 @@ python3 "$HOME/.agents/skills/deeper-research/scripts/batch_research.py" \
 
 Use `--dry-run` to inspect every pending command without launching workers. Completed
 directories containing `RESEARCH-BIBLE.md` are skipped; distinct questions with similar
-names receive stable hashed directories. Logs live under `research/_batch/logs/`.
+names receive stable hashed directories. Logs live under `<launch-dir>/_batch/logs/`.
 
 Claude uses the same scheduler but still requires a pre-approved containment wrapper:
 
 ```bash
 python3 "$HOME/.claude/skills/deeper-research/scripts/batch_research.py" \
-  questions.txt --adapter claude --output-root research \
+  questions.txt --adapter claude \
   --claude-runner "/absolute/path/to/contained-runner"
 ```
 
@@ -266,7 +273,7 @@ The wrapper receives the complete `claude` invocation as arguments plus
 mount the skill root read-only, make only the run directory writable, and then execute
 the supplied command. `--allowedTools` alone does not path-scope Claude writes.
 
-Monitor with `tail -f research/_batch/logs/*.log` or run the script with `--help` for all
+Monitor with `tail -f _batch/logs/*.log` or run the script with `--help` for all
 controls. Cost still scales linearly (~$0.5–0.8 Exa per question plus LLM legs); adaptive
 concurrency changes throughput, not per-question budgets or evidence gates.
 

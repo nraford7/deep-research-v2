@@ -336,3 +336,32 @@ def test_cli_dry_run_reports_default_policy_without_launching_workers(tmp_path, 
     assert "adaptive concurrency: initial=2 maximum=8" in output
     assert output.count("codex exec") == 2
     assert not list(tmp_path.rglob("RESEARCH-BIBLE.md"))
+
+
+def test_cli_defaults_output_root_to_project_launch_directory(
+    tmp_path, monkeypatch, capsys
+):
+    project_launch_dir = tmp_path / "project-research"
+    project_launch_dir.mkdir()
+    questions = tmp_path / "questions.txt"
+    questions.write_text("Question one\n")
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+    monkeypatch.chdir(project_launch_dir)
+
+    returncode = batch_research.main(
+        [
+            str(questions),
+            "--adapter",
+            "codex",
+            "--skill-root",
+            str(skill_root),
+            "--dry-run",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert returncode == 0
+    assert str(project_launch_dir) in output
+    assert (project_launch_dir / "_batch" / "logs").is_dir()
+    assert not (project_launch_dir / "research").exists()
