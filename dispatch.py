@@ -85,10 +85,10 @@ def main():
     print(f"  2. {_fmt(slice_cmd)}")
     print(f"  3. {_fmt(gate_cmd)}")
     print(f"  4. {_fmt(chase_cmd)}")
-    print("     (citation_chase exit 0 = ran, expanded or nothing new; a NONZERO "
-          "exit (40 OpenAlex unreachable, 41 no resolvable seeds, 22 still thin) "
-          "means it could not complete: do NOT proceed as if expansion succeeded, "
-          "surface and resolve it.)")
+    print("     (citation_chase cascades OpenAlex → Semantic Scholar; if both fail it "
+          "returns 0 in explicit degraded mode. Inspect round1/citation_chase_status.json "
+          "and carry graph_verified=false into the final report. Exit 22 remains "
+          "fail-closed.)")
     print("  5. DEFAULT coverage audit: follow references/squad-audit.md "
           "(checklist + isolated panel + per-gap verification, then re-gate).")
     print(f"     FALLBACK ONLY when native subagents are unavailable: {_fmt(audit_cmd)}")

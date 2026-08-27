@@ -94,6 +94,29 @@ def test_prepare_jobs_keeps_slugs_stable_when_a_later_batch_adds_a_collision(tmp
     assert remaining[0].run_dir != original[0].run_dir
 
 
+def test_prepare_jobs_accepts_explicit_slug_tsv_for_resuming_named_runs(tmp_path):
+    lines = [
+        "wu-wei\tWhat is wu wei?",
+        "shi-strategy\tWhat is shi?",
+    ]
+
+    jobs = batch_research.prepare_jobs(lines, tmp_path)
+
+    assert [job.slug for job in jobs] == ["wu-wei", "shi-strategy"]
+    assert [job.question for job in jobs] == ["What is wu wei?", "What is shi?"]
+    assert jobs[0].run_dir == tmp_path / "wu-wei"
+
+    (jobs[0].run_dir / "RESEARCH-BIBLE.md").write_text("done")
+    remaining = batch_research.prepare_jobs(lines, tmp_path)
+    assert [job.slug for job in remaining] == ["shi-strategy"]
+
+
+@pytest.mark.parametrize("line", ["../escape\tQuestion", "/absolute\tQuestion", "bad slug\tQuestion"])
+def test_prepare_jobs_rejects_unsafe_explicit_slugs(tmp_path, line):
+    with pytest.raises(ValueError, match="invalid explicit slug"):
+        batch_research.prepare_jobs([line], tmp_path)
+
+
 def test_codex_invocation_is_workspace_scoped_and_scrubs_api_routing(tmp_path):
     job = batch_research.prepare_jobs(["Why adaptive scheduling?"], tmp_path)[0]
     skill_root = tmp_path / "skill"
@@ -109,6 +132,8 @@ def test_codex_invocation_is_workspace_scoped_and_scrubs_api_routing(tmp_path):
         "--ephemeral",
         "--sandbox",
         "workspace-write",
+        "-c",
+        "sandbox_workspace_write.network_access=true",
         "--skip-git-repo-check",
         "-",
     ]

@@ -69,7 +69,7 @@ Round 0    SCOPE            scope.py → scope.json (domain + source priorities)
 Round 1    RETRIEVE         slice_search.py → Exa slices (full text) + academic anchor
               ↓             fetch_fulltext.py → download full text of EVERY source (keep longest; save raw)
               ↓             evidence_gate.py → MUST pass (exit 0) before any synthesis
-              ↓             citation_chase.py → one-hop citation graph fill (co-citation + citing works), re-gate
+              ↓             citation_chase.py → OpenAlex → Semantic Scholar fallback → explicit degraded mode, re-gate
               ↓             coverage audit → follow references/squad-audit.md (DEFAULT: checklist + panel + verify, dispatched inline) — coverage_audit.py is the single-model fallback — name expected-but-absent coverage, fill, re-gate
 Round 2    SYNTHESIZE       compare the corpus; emit the six EXACT headers (4 feed buckets)
               ↓
@@ -247,16 +247,31 @@ python3 scripts/citation_chase.py \
   --topic "Your topic"
 ```
 
-**Fail-CLOSED exit codes (read them before proceeding).** Exit `0` means the chase RAN:
-it either expanded the corpus or found nothing new after dedupe · in both cases proceed.
-A NONZERO exit means the chase could NOT complete, and you must NOT proceed as if
-expansion succeeded: surface the code and resolve it before the coverage audit.
-- `40`: every OpenAlex request failed (network unreachable) · the chase could not run.
-- `41`: no seed yielded a resolvable OpenAlex id or references · nothing to chase.
-- `22`: the re-gate found the corpus STILL too thin / a row failed re-validation.
-Any nonzero code means the enlarged corpus is unverified: surface it, resolve it (restore
-network, broaden the seed corpus, re-fetch), and only continue to the coverage audit once
-the chase returns `0`.
+**Mandatory scholarly-provider resilience rule.** Every OpenAlex-dependent scholarly
+graph or citation-resolution path MUST have an implemented, offline-tested Semantic
+Scholar fallback. Tests must cover at least: OpenAlex success (fallback not called),
+OpenAlex quota/network failure with Semantic Scholar success, and both providers failing.
+An OpenAlex-only network gate is not acceptable.
+
+For the citation chase, the automatic cascade is:
+
+1. OpenAlex first.
+2. On a total OpenAlex HTTP/network/quota failure, or no usable OpenAlex seed graph,
+   run the Semantic Scholar graph fallback automatically.
+3. If Semantic Scholar also fails or cannot resolve a seed, continue in explicit
+   **degraded mode** over the already evidence-gated base corpus. Never wait for quota
+   reset and never pretend the citation graph was verified.
+
+Every invocation writes `round1/citation_chase_status.json`. Read it even when the
+process exits `0`:
+
+- `mode: openalex` or `semantic-scholar-fallback` with `graph_verified: true` — proceed.
+- `mode: degraded` with `graph_verified: false` — proceed, but carry a visible
+  citation-graph limitation through the coverage audit, synthesis, integration,
+  Round-4 adversary, and final Research Bible. The final document must not claim
+  citation-graph completeness.
+- Exit `22` — the re-gate found the corpus still too thin or a row failed validation;
+  this remains fail-closed and must be resolved before coverage audit or synthesis.
 
 **Step 1.5 · coverage audit (run after the gate passes).** The gate asks "is the
 corpus thick enough?"; this asks a different question: "for THIS scope, what coverage a
@@ -784,8 +799,9 @@ session is fully isolated (its own context, Exa ledger, and `research/<slug>/` f
 so they do not interfere. Cap concurrency to available host slots and API/Exa limits.
 
 Use `scripts/batch_research.py`; do not replace it with a fixed-concurrency shell loop.
-The default policy starts at two workers, adds one after each healthy 60-second window,
-and caps at eight:
+Each input line may be a question or `existing-slug<TAB>question` when resuming named
+run directories. The default policy starts at two workers, adds one after each healthy
+60-second window, and caps at eight:
 
 ```bash
 python3 "$HOME/.agents/skills/deeper-research/scripts/batch_research.py" \
@@ -826,7 +842,7 @@ python3 scripts/scope.py --topic "$TOPIC" --scope "LCOE trends, chemistry mix, c
 python3 scripts/slice_search.py --run-dir "$RUN" --topic "$TOPIC" --max-retrieval-usd 1
 python3 scripts/evidence_gate.py --run-dir "$RUN"        # must exit 0 before synthesis
 python3 scripts/fetch_fulltext.py --run-dir "$RUN"       # download full text of every source (keep longest; save raw)
-python3 scripts/citation_chase.py --run-dir "$RUN" --topic "$TOPIC"   # one-hop citation-graph fill, re-gate (fail-closed: 0 ran · 40 OpenAlex unreachable · 41 no resolvable seeds · 22 still-thin → surface, don't proceed as if expansion succeeded)
+python3 scripts/citation_chase.py --run-dir "$RUN" --topic "$TOPIC"   # OpenAlex → tested Semantic Scholar fallback → explicit degraded status if both fail; inspect citation_chase_status.json; exit 22 remains fail-closed
 python3 scripts/coverage_audit.py --run-dir "$RUN" --topic "$TOPIC"   # name + fill expected-but-absent coverage, re-gate
 python3 scripts/fetch_fulltext.py --run-dir "$RUN"       # SECOND pass: pull full text for the gap-slice sources the audit just added (fail-open · $0 · never ledgered)
 # → Round 2 synthesis subagent (emit the six EXACT headers) → round2/synthesis.md
@@ -852,9 +868,11 @@ When `$deeper-research [topic]` (Codex) or `/deeper-research [topic]` (Claude Co
 3. **Evidence gate** — `evidence_gate.py`; **exit 0 required** before any synthesis
    (exit 22 → fix corpus + `--resume` + re-gate; exit 21 → raise cap, surface, resume).
 4. **Citation-graph fill:** `citation_chase.py --run-dir … --topic …`; one-hop co-citation +
-   citing-works expansion, then re-gate. Fail-closed exits: 0 = ran; 40 = OpenAlex unreachable;
-   41 = no resolvable seeds; 22 = still thin. On any non-zero, surface the code, do NOT proceed
-   as if expansion succeeded.
+   citing-works expansion, then re-gate. It MUST cascade OpenAlex → Semantic Scholar and,
+   only if both fail, continue in explicit degraded mode. Read
+   `round1/citation_chase_status.json`: `graph_verified: true` proceeds normally;
+   `graph_verified: false` proceeds with the limitation carried into every later round
+   and the final Bible. Exit 22 remains fail-closed; fix and re-gate before proceeding.
 5. **Coverage audit (DEFAULT: the bundled squad procedure):** follow `references/squad-audit.md`
    on this run dir — checklist + sibling sweep + persona panel + per-gap adversarial verify (you
    dispatch the selected adapter's isolated persona subagents inline, batching within
@@ -892,6 +910,7 @@ When `$deeper-research [topic]` (Codex) or `/deeper-research [topic]` (Claude Co
 | Echo-chamber review | Adversary forced through the independent-family rule; OpenAI ↔ xAI is excluded |
 | Bibliography skewed to blogs/wikis | `classify_sources.py` quality score |
 | Major canonical works missing | `lit_search.py --compare-bib` |
+| OpenAlex quota/network failure | Automatic tested Semantic Scholar fallback; if both fail, explicit degraded status and a visible final-report limitation |
 | Partial retrieval failure | `slice_search.py --resume` skips slices whose jsonl parses |
 | WebFetch hallucination | No-WebFetch rule — curl the raw page, grep/read the real text |
 | Silent stall in a network script | `CappedRetry` bounds Retry-After sleeps (30s); wrap long runs in `scripts/watched.py` (kills on stale output, exit 99) |

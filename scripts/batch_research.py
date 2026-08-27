@@ -18,6 +18,7 @@ _SATURATION_RE = re.compile(
     r"concurren(?:cy|t sessions?)|provider capacity",
     re.IGNORECASE,
 )
+_EXPLICIT_SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 
 
 def is_saturation_failure(returncode, log_text):
@@ -66,21 +67,41 @@ def _question_slug(question):
 
 
 def prepare_jobs(questions, output_root):
-    """Create isolated pending jobs, preserving stable names across resumed batches."""
+    """Create isolated pending jobs, preserving stable names across resumed batches.
+
+    A line may be plain question text (stable hashed slug) or
+    ``explicit-slug<TAB>question`` for resuming an existing named run directory.
+    """
 
     output_root = Path(output_root).resolve()
     logs_dir = output_root / "_batch" / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     seen_questions = set()
-    unique_questions = []
+    seen_slugs = {}
+    unique_jobs = []
     for raw in questions:
-        question = raw.strip()
-        if question and question not in seen_questions:
-            seen_questions.add(question)
-            unique_questions.append(question)
+        line = raw.strip()
+        if not line:
+            continue
+        if "\t" in line:
+            explicit_slug, question = (part.strip() for part in line.split("\t", 1))
+            if not _EXPLICIT_SLUG_RE.fullmatch(explicit_slug):
+                raise ValueError(f"invalid explicit slug: {explicit_slug!r}")
+            slug = explicit_slug
+        else:
+            question = line
+            slug = _question_slug(question)
+        if not question or question in seen_questions:
+            continue
+        prior_question = seen_slugs.get(slug)
+        if prior_question is not None and prior_question != question:
+            raise ValueError(
+                f"explicit slug collision: {slug!r} names multiple questions")
+        seen_questions.add(question)
+        seen_slugs[slug] = question
+        unique_jobs.append((slug, question))
     jobs = []
-    for question in unique_questions:
-        slug = _question_slug(question)
+    for slug, question in unique_jobs:
         run_dir = output_root / slug
         run_dir.mkdir(parents=True, exist_ok=True)
         if (run_dir / "RESEARCH-BIBLE.md").exists():
@@ -110,7 +131,9 @@ def build_invocation(adapter, job, skill_root, claude_runner=None):
         return Invocation(
             [
                 "codex", "exec", "-C", str(job.run_dir), "--ephemeral",
-                "--sandbox", "workspace-write", "--skip-git-repo-check", "-",
+                "--sandbox", "workspace-write",
+                "-c", "sandbox_workspace_write.network_access=true",
+                "--skip-git-repo-check", "-",
             ],
             job.run_dir,
             prompt,
@@ -291,7 +314,10 @@ def _parser():
     parser = argparse.ArgumentParser(
         description="Run independent deeper-research questions with adaptive concurrency."
     )
-    parser.add_argument("questions_file", type=Path, help="UTF-8 file with one question per line")
+    parser.add_argument(
+        "questions_file", type=Path,
+        help="UTF-8 file with question or explicit-slug<TAB>question per line",
+    )
     parser.add_argument("--adapter", choices=("codex", "claude"), required=True)
     parser.add_argument("--output-root", type=Path, default=Path("research"))
     parser.add_argument("--skill-root", type=Path)
@@ -332,7 +358,10 @@ def main(argv=None):
         parser.error(str(exc))
 
     questions = args.questions_file.read_text(encoding="utf-8").splitlines()
-    jobs = prepare_jobs(questions, args.output_root)
+    try:
+        jobs = prepare_jobs(questions, args.output_root)
+    except ValueError as exc:
+        parser.error(str(exc))
     print(
         f"adaptive concurrency: initial={limit.initial} maximum={limit.maximum} "
         f"window={limit.stability_window:g}s backoff={limit.backoff_seconds:g}s"

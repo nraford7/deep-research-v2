@@ -25,6 +25,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     import requests
@@ -72,6 +73,16 @@ class OpenAlexError(Exception):
     does NOT raise; only a transport/server error (not r.ok) raises. Callers that
     must fail closed on a real outage (citation_chase's oa_failures counter) can
     catch this to distinguish a genuine empty result from an unreachable API."""
+    pass
+
+
+class SemanticScholarError(Exception):
+    """Raised when every request in a Semantic Scholar graph operation fails.
+
+    A successful request with zero matches returns an empty list. Citation-chase
+    uses this distinction to record an actual provider failure separately from a
+    clean graph query that found no work.
+    """
     pass
 
 
@@ -184,8 +195,8 @@ def openalex_cites(work_ids, limit: int = 25):
     at most 50 ids per request; >50 seeds are split across ceil(#ids/50) calls.
     ``limit`` bounds the total works returned across all batches.
 
-    A real HTTP error RAISES OpenAlexError (fail closed) so citation_chase counts
-    it as a failed OpenAlex attempt (exit 40), never a silent empty result."""
+    A real HTTP error RAISES OpenAlexError so citation_chase can trigger its
+    Semantic Scholar fallback, never a silent empty result."""
     if isinstance(work_ids, str):
         work_ids = [work_ids]
     bare = []
@@ -220,7 +231,7 @@ def openalex_cites(work_ids, limit: int = 25):
         if not r.ok:
             # Partial-tolerant fail: a real HTTP error on ONE batch is recorded
             # and the loop continues. Only a TOTAL outage (every batch failed)
-            # raises below, so citation_chase counts it as exit 40; a partial
+            # raises below, so citation_chase triggers fallback; a partial
             # outage returns whatever succeeded and does NOT trigger a false 40.
             failed += 1
             continue
@@ -268,8 +279,8 @@ def openalex_works_by_id(ids):
     # batch that errors is recorded as failed and the loop CONTINUES the other
     # batches, so an early success is never discarded when a later batch fails.
     # We raise OpenAlexError ONLY when EVERY batch failed (a total outage); the
-    # caller (citation_chase) treats a raise as a total failure → exit 40 and a
-    # partial return as NOT a total failure (no false exit 40). A single-batch
+    # caller (citation_chase) treats a raise as a total failure and cascades to
+    # Semantic Scholar; a partial return is not a total failure. A single-batch
     # total non-ok still raises, preserving S2's fail-closed behavior.
     counts = {"batches": 0, "failed": 0}
 
@@ -297,6 +308,136 @@ def openalex_works_by_id(ids):
         raise OpenAlexError(
             f"OpenAlex works_by_id: all {counts['batches']} batch(es) failed")
     return out
+
+
+def _semantic_scholar_work_to_dict(p):
+    """Map an S2 paper object to the graph-neutral work shape used downstream."""
+    external = p.get("externalIds") or {}
+    paper_id = p.get("paperId") or p.get("paper_id")
+    return {
+        "paper_id": paper_id,
+        "title": (p.get("title") or "").strip(),
+        "year": p.get("year"),
+        "cited_by": p.get("citationCount", p.get("cited_by")),
+        "doi": external.get("DOI") or p.get("doi"),
+        "authors": [a.get("name") for a in (p.get("authors") or [])[:5]
+                    if isinstance(a, dict)],
+        "venue": p.get("venue"),
+        "source": "semantic_scholar",
+    }
+
+
+def _semantic_scholar_session():
+    session = _make_session()
+    if SS_KEY:
+        session.headers["x-api-key"] = SS_KEY
+    return session
+
+
+def semantic_scholar_papers_by_id(ids):
+    """Resolve DOI:/S2 paper ids through the S2 batch endpoint.
+
+    Batches are partial-tolerant; only a total transport/HTTP failure raises
+    SemanticScholarError. A successful batch containing null/no matches returns
+    the matches it did resolve (possibly none).
+    """
+    values = []
+    seen = set()
+    for value in ids or []:
+        value = str(value or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            values.append(value)
+    if not values:
+        return []
+
+    session = _semantic_scholar_session()
+    fields = "title,year,citationCount,authors,venue,externalIds"
+    out = []
+    batches = failed = 0
+    for start in range(0, len(values), 500):
+        batches += 1
+        try:
+            response = session.post(
+                f"{SEMANTIC_SCHOLAR}/paper/batch",
+                params={"fields": fields},
+                json={"ids": values[start:start + 500]},
+                timeout=30,
+            )
+        except requests.RequestException:
+            failed += 1
+            continue
+        if not response.ok:
+            failed += 1
+            continue
+        payload = response.json()
+        for paper in payload if isinstance(payload, list) else []:
+            if isinstance(paper, dict) and paper.get("paperId"):
+                out.append(_semantic_scholar_work_to_dict(paper))
+    if batches and failed == batches:
+        raise SemanticScholarError(
+            f"Semantic Scholar papers_by_id: all {batches} batch(es) failed")
+    return out
+
+
+def semantic_scholar_references(paper_id, limit: int = 100):
+    """Return papers referenced by one S2 paper, with graph-ready metadata."""
+    if not paper_id:
+        return []
+    session = _semantic_scholar_session()
+    fields = "title,year,citationCount,authors,venue,externalIds"
+    try:
+        response = session.get(
+            f"{SEMANTIC_SCHOLAR}/paper/{quote(str(paper_id), safe=':')}/references",
+            params={"fields": fields, "limit": min(1000, max(1, limit))},
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        raise SemanticScholarError("Semantic Scholar references request failed") from exc
+    if not response.ok:
+        raise SemanticScholarError(
+            f"Semantic Scholar references HTTP {response.status_code}")
+    out = []
+    for edge in response.json().get("data", []) or []:
+        paper = (edge or {}).get("citedPaper") or {}
+        if paper.get("paperId"):
+            out.append(_semantic_scholar_work_to_dict(paper))
+    return out
+
+
+def semantic_scholar_cites(work_ids, limit: int = 25):
+    """Return works citing any supplied S2 paper id, partial-tolerant by seed."""
+    if isinstance(work_ids, str):
+        work_ids = [work_ids]
+    ids = list(dict.fromkeys(str(x) for x in (work_ids or []) if x))
+    if not ids:
+        return []
+    session = _semantic_scholar_session()
+    fields = "title,year,citationCount,authors,venue,externalIds"
+    out = []
+    failed = 0
+    for paper_id in ids:
+        try:
+            response = session.get(
+                f"{SEMANTIC_SCHOLAR}/paper/{quote(paper_id, safe=':')}/citations",
+                params={"fields": fields, "limit": min(1000, max(1, limit))},
+                timeout=30,
+            )
+        except requests.RequestException:
+            failed += 1
+            continue
+        if not response.ok:
+            failed += 1
+            continue
+        for edge in response.json().get("data", []) or []:
+            paper = (edge or {}).get("citingPaper") or {}
+            if paper.get("paperId"):
+                out.append(_semantic_scholar_work_to_dict(paper))
+    if failed == len(ids):
+        raise SemanticScholarError(
+            f"Semantic Scholar cites: all {len(ids)} request(s) failed")
+    out.sort(key=lambda work: -(work.get("cited_by") or 0))
+    return out[:limit]
 
 
 def query_semantic_scholar(topic: str, limit: int = 50):

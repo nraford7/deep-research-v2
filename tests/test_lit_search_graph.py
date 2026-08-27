@@ -1,7 +1,6 @@
-"""lit_search citation-graph helpers — OFFLINE. Every OpenAlex GET is served by a
-FakeSession; NO network, NO DNS. Covers query_openalex carrying referenced_works,
-openalex_works_by_id batching (<=50 ids/request), openalex_cites parsing, and the
-bare-id helper.
+"""lit_search citation-graph helpers — OFFLINE. Every provider call is served by a
+FakeSession; NO network, NO DNS. Covers OpenAlex graph operations and the Semantic
+Scholar batch/reference/citation helpers used by the automatic fallback.
 """
 
 import sys
@@ -48,6 +47,14 @@ class FakeSession:
             body = self._bodies
         return FakeResponse(body)
 
+    def post(self, url, params=None, json=None, timeout=None):
+        self.calls.append({"url": url, "params": params or {}, "json": json or {}})
+        if isinstance(self._bodies, list):
+            body = self._bodies[min(len(self.calls) - 1, len(self._bodies) - 1)]
+        else:
+            body = self._bodies
+        return FakeResponse(body)
+
 
 def _oa_work(wid, refs=None, cited=0, doi=None, title="T"):
     return {
@@ -60,6 +67,64 @@ def _oa_work(wid, refs=None, cited=0, doi=None, title="T"):
         "authorships": [],
         "type": "article",
     }
+
+
+def _s2_paper(paper_id, doi=None, cited=0, title="S2 work"):
+    return {
+        "paperId": paper_id,
+        "title": title,
+        "year": 2022,
+        "citationCount": cited,
+        "externalIds": {"DOI": doi} if doi else {},
+        "authors": [{"name": "Ada Author"}],
+        "venue": "Journal",
+    }
+
+
+# --- Semantic Scholar fallback helpers -------------------------------------
+
+def test_semantic_scholar_batch_resolves_doi_and_maps_metadata(monkeypatch):
+    session = FakeSession([[_s2_paper("S2-A", doi="10.1/a", cited=12)]])
+    monkeypatch.setattr(lit_search, "_make_session", lambda: session)
+
+    out = lit_search.semantic_scholar_papers_by_id(["DOI:10.1/a"])
+
+    assert session.calls[0]["url"].endswith("/paper/batch")
+    assert session.calls[0]["json"] == {"ids": ["DOI:10.1/a"]}
+    assert out == [{
+        "paper_id": "S2-A", "title": "S2 work", "year": 2022,
+        "cited_by": 12, "doi": "10.1/a", "authors": ["Ada Author"],
+        "venue": "Journal", "source": "semantic_scholar",
+    }]
+
+
+def test_semantic_scholar_reference_and_citation_edges_are_unwrapped(monkeypatch):
+    session = FakeSession([
+        {"data": [{"citedPaper": _s2_paper("S2-REF", cited=7)}]},
+        {"data": [{"citingPaper": _s2_paper("S2-CITE", cited=9)}]},
+    ])
+    monkeypatch.setattr(lit_search, "_make_session", lambda: session)
+
+    refs = lit_search.semantic_scholar_references("S2-SEED", limit=10)
+    cites = lit_search.semantic_scholar_cites(["S2-SEED"], limit=10)
+
+    assert refs[0]["paper_id"] == "S2-REF"
+    assert cites[0]["paper_id"] == "S2-CITE"
+    assert session.calls[0]["url"].endswith("/S2-SEED/references")
+    assert session.calls[1]["url"].endswith("/S2-SEED/citations")
+
+
+def test_semantic_scholar_http_failure_raises_provider_error(monkeypatch):
+    class DeadSession(FakeSession):
+        def post(self, url, params=None, json=None, timeout=None):
+            self.calls.append({"url": url, "params": params or {}, "json": json or {}})
+            return FakeResponse({}, status=429)
+
+    session = DeadSession({})
+    monkeypatch.setattr(lit_search, "_make_session", lambda: session)
+
+    with pytest.raises(lit_search.SemanticScholarError):
+        lit_search.semantic_scholar_papers_by_id(["DOI:10.1/a"])
 
 
 # --- _bare_openalex_id ------------------------------------------------------
@@ -181,8 +246,8 @@ def test_openalex_cites_empty_list_makes_no_request(monkeypatch):
 
 
 def test_openalex_cites_http_error_raises(monkeypatch):
-    # BUG S2: a real HTTP error must RAISE (fail closed) so citation_chase's
-    # oa_failures counter fires exit 40, not silently return [].
+    # A real HTTP error must RAISE so citation_chase triggers its provider
+    # fallback, not silently return [].
     class ErrSession(FakeSession):
         def get(self, url, params=None, timeout=None):
             self.calls.append({"url": url, "params": params or {}})
@@ -278,7 +343,7 @@ def test_works_by_id_partial_batch_failure_returns_partial(monkeypatch):
 
 
 def test_works_by_id_total_outage_raises(monkeypatch):
-    # 120 W-ids → 3 batches, EVERY batch fails → total outage → raise (exit 40).
+    # 120 W-ids → 3 batches, EVERY batch fails → total outage → raise for fallback.
     class DeadSession(FakeSession):
         def get(self, url, params=None, timeout=None):
             self.calls.append({"url": url, "params": params or {}})

@@ -139,9 +139,9 @@ python3 scripts/slice_search.py --run-dir "$RUN" --topic "$TOPIC" --max-retrieva
 python3 scripts/evidence_gate.py --run-dir "$RUN"
 
 # 4a. Citation chase: one-hop citation-graph fill (co-citation + citing works),
-#     then re-gate. Exit 0 = ran (expanded or nothing new); a NONZERO exit (40
-#     OpenAlex unreachable, 41 no resolvable seeds, 22 still thin) means it could
-#     not complete: do NOT proceed as if expansion succeeded, surface and resolve.
+#     then re-gate. Automatically cascades OpenAlex → Semantic Scholar. If both
+#     fail it returns 0 in explicit degraded mode; inspect citation_chase_status.json
+#     and carry graph_verified=false into the final report. Exit 22 remains fail-closed.
 python3 scripts/citation_chase.py --run-dir "$RUN" --topic "$TOPIC"
 
 # 4b. Coverage audit: name + fill expected-but-absent coverage, then re-gate.
@@ -323,6 +323,9 @@ and host-specific examples.
 
 **Free APIs (no key required):** OpenAlex, Crossref, Semantic Scholar (low rate).
 
+For adaptive headless batches, `scripts/batch_research.py` accepts either one question
+per line or `existing-slug<TAB>question` to resume exact named run directories.
+
 ## Helper scripts
 
 | Script | Purpose |
@@ -330,7 +333,7 @@ and host-specific examples.
 | `scripts/scope.py` | Domain classification + source priority recommendations (rule-based + optional configured LLM) |
 | `scripts/slice_search.py` | Round-1 retrieval: Exa search slices + a free academic anchor; ledger-capped; writes jsonl briefs + manifest |
 | `scripts/evidence_gate.py` | Refuse synthesis over a thin corpus — exit 0 if thick enough and every row re-validates, else exit 22 |
-| `scripts/citation_chase.py` | Post-gate one-hop citation-graph fill: backward co-citation + a small forward citing-works pass, deduped against the corpus, written to `slice_citation.jsonl`, then re-gated. Fail-closed: exit 0 = ran (expanded or nothing new), nonzero (40 OpenAlex unreachable, 41 no resolvable seeds, 22 still thin) = could not complete, do not proceed as if expansion succeeded |
+| `scripts/citation_chase.py` | Post-gate one-hop citation-graph fill with a tested OpenAlex → Semantic Scholar cascade. If both providers fail, writes `citation_chase_status.json` with `graph_verified=false` and continues in explicit degraded mode; exit 22 remains fail-closed. |
 | `scripts/coverage_audit.py` | Single-model **fallback** coverage auditor (the default is the bundled squad procedure in `references/squad-audit.md`): name expected-but-absent coverage, fill each gap with a scope-bounded Exa slice, re-gate. Fail-closed: exit 0 = coverage verified, nonzero (30/31/32/21/22) = unverified, do not synthesize |
 | `scripts/lint_background.py` | Round-4 numeric tripwire inside fenced editorial blocks: exit 0 clean, exit 1 if a fenced block names a quantity |
 | `scripts/deepen_questions.py` | Round 2.5 deepening: root-cause / consequence / gap questions answered with Exa deep-reasoning |

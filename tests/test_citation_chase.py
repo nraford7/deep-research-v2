@@ -1,10 +1,10 @@
-"""citation_chase — OFFLINE. Every OpenAlex graph helper is monkeypatched and the
+"""citation_chase — OFFLINE. Every citation-graph helper is monkeypatched and the
 fetch_fulltext / evidence_gate subprocess shell-outs are stubbed, so NO network
 and NO real child process ever run.
 
 Covers: seed selection, the one-hop guard (slice_citation excluded), co-citation
-ranking, composite DOI/OpenAlex-id dedupe, the two fail-closed exit codes, and a
-gate-visible slice_citation.jsonl written with valid url+tier rows.
+ranking, composite identity dedupe, OpenAlex → Semantic Scholar fallback,
+explicit degraded mode, and a gate-visible citation slice.
 """
 
 import json
@@ -46,6 +46,16 @@ def _stub_children(monkeypatch, gate_rc=0):
         return _Proc(0)
     monkeypatch.setattr(citation_chase.subprocess, "run", fake_run)
     return calls
+
+
+def _stub_s2_failure(monkeypatch):
+    """Make Semantic Scholar unavailable without allowing a real network call."""
+    def boom(*_args, **_kwargs):
+        raise lit_search.SemanticScholarError("Semantic Scholar unavailable")
+
+    monkeypatch.setattr(lit_search, "semantic_scholar_papers_by_id", boom)
+    monkeypatch.setattr(lit_search, "semantic_scholar_references", boom)
+    monkeypatch.setattr(lit_search, "semantic_scholar_cites", boom)
 
 
 def _seed_row(bare_id=None, doi=None, refs=None, cited=0, extra=None):
@@ -348,14 +358,46 @@ def test_dedupe_candidate_with_both_ids_matches_corpus_wid_only(monkeypatch, tmp
     assert "W_DUP" not in ids  # dropped by its W-id identity despite carrying a DOI
 
 
-# --- F6: a forward-only OpenAlex failure (backward empty) exits 40 -----------
+# --- provider cascade: OpenAlex → Semantic Scholar → degraded ---------------
 
-def test_forward_only_openalex_failure_exits_40(monkeypatch, tmp_path):
+def test_openalex_success_does_not_call_semantic_scholar(monkeypatch, tmp_path):
+    round1 = tmp_path / "round1"
+    _write_slice(round1, "anchor", [
+        _seed_row(bare_id="A1", refs=["W-SPINE"]),
+        _seed_row(bare_id="A2", refs=["W-SPINE"]),
+    ])
+
+    monkeypatch.setattr(
+        lit_search, "openalex_works_by_id",
+        lambda ids: [{"id": f"https://openalex.org/{lit_search._bare_openalex_id(i)}",
+                      "title": "Spine", "cited_by": 5, "year": 2018,
+                      "referenced_works": []} for i in ids],
+    )
+    monkeypatch.setattr(lit_search, "openalex_cites", lambda *_a, **_k: [])
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Semantic Scholar must not run after OpenAlex succeeds")
+
+    monkeypatch.setattr(lit_search, "semantic_scholar_papers_by_id", forbidden)
+    monkeypatch.setattr(lit_search, "semantic_scholar_references", forbidden)
+    monkeypatch.setattr(lit_search, "semantic_scholar_cites", forbidden)
+    _stub_children(monkeypatch)
+
+    rc = citation_chase.main([
+        "--run-dir", str(tmp_path), "--topic", "t", "--no-forward"])
+
+    assert rc == 0
+    status = json.loads((round1 / "citation_chase_status.json").read_text())
+    assert status["mode"] == "openalex"
+    assert status["graph_verified"] is True
+    assert status["semantic_scholar_status"] == "not-needed"
+
+def test_forward_only_openalex_failure_downgrades_when_s2_has_no_seed(monkeypatch, tmp_path):
     round1 = tmp_path / "round1"
     # Single seed already carrying refs (no re-hydrate). Its only ref is already
     # in the corpus, so there are NO backward candidates. The forward cites call
-    # then RAISES. With no other OpenAlex traffic, every attempt failed → exit 40,
-    # not a false na/0. This site was invisible to the old seed-only exit-40 check.
+    # then RAISES. These seeds have no DOI/S2 id, so the required S2 fallback has
+    # no resolvable input and the run must continue in explicit degraded mode.
     _write_slice(round1, "anchor", [
         _seed_row(bare_id="A1", refs=["A2"]),
         _seed_row(bare_id="A2", refs=["A1"]),
@@ -369,18 +411,79 @@ def test_forward_only_openalex_failure_exits_40(monkeypatch, tmp_path):
     monkeypatch.setattr(lit_search, "openalex_works_by_id", lambda ids: [])
 
     def no_child(*a, **k):
-        raise AssertionError("no child process on a fail-closed chase")
+        raise AssertionError("no child process when degraded without new rows")
     monkeypatch.setattr(citation_chase.subprocess, "run", no_child)
 
     rc = citation_chase.main(["--run-dir", str(tmp_path), "--topic", "t"])
-    assert rc == citation_chase.CHASE_OPENALEX_UNREACHABLE
-    assert rc == 40
+    assert rc == 0
+    status = json.loads((round1 / "citation_chase_status.json").read_text())
+    assert status["mode"] == "degraded"
+    assert status["graph_verified"] is False
     assert not (round1 / "slice_citation.jsonl").exists()
 
 
-# --- fail-closed: exit 40 (every OpenAlex request failed) -------------------
+# --- Semantic Scholar fallback succeeds -------------------------------------
 
-def test_all_openalex_error_exits_40(monkeypatch, tmp_path):
+def test_openalex_failure_uses_semantic_scholar_fallback(monkeypatch, tmp_path):
+    round1 = tmp_path / "round1"
+    _write_slice(round1, "anchor", [
+        _seed_row(doi="10.1/a", cited=20),
+        _seed_row(doi="10.1/b", cited=10),
+    ])
+
+    def openalex_down(_ids):
+        raise lit_search.OpenAlexError("OpenAlex HTTP 429")
+
+    monkeypatch.setattr(lit_search, "openalex_works_by_id", openalex_down)
+    monkeypatch.setattr(lit_search, "openalex_cites", lambda *_a, **_k: [])
+
+    def s2_by_id(ids):
+        out = []
+        for value in ids:
+            if value == "DOI:10.1/a":
+                out.append({"paper_id": "S2-A", "doi": "10.1/a", "title": "Seed A",
+                            "cited_by": 20, "year": 2020, "source": "semantic_scholar"})
+            elif value == "DOI:10.1/b":
+                out.append({"paper_id": "S2-B", "doi": "10.1/b", "title": "Seed B",
+                            "cited_by": 10, "year": 2021, "source": "semantic_scholar"})
+            elif value == "S2-SPINE":
+                out.append({"paper_id": "S2-SPINE", "doi": "10.2/spine",
+                            "title": "Shared spine", "cited_by": 99, "year": 2015,
+                            "authors": ["A. Scholar"], "venue": "Journal",
+                            "source": "semantic_scholar"})
+        return out
+
+    monkeypatch.setattr(lit_search, "semantic_scholar_papers_by_id", s2_by_id)
+    monkeypatch.setattr(
+        lit_search, "semantic_scholar_references",
+        lambda paper_id, limit=100: [{"paper_id": "S2-SPINE", "title": "Shared spine"}],
+    )
+    monkeypatch.setattr(lit_search, "semantic_scholar_cites", lambda *_a, **_k: [])
+    _stub_children(monkeypatch)
+
+    rc = citation_chase.main([
+        "--run-dir", str(tmp_path), "--topic", "t", "--no-forward"])
+
+    assert rc == 0
+    rows = [json.loads(line) for line in (round1 / "slice_citation.jsonl")
+            .read_text().splitlines() if line.strip()]
+    assert len(rows) == 1
+    assert rows[0]["semantic_scholar_id"] == "S2-SPINE"
+    assert rows[0]["citation_provider"] == "semantic_scholar"
+    assert rows[0]["cocitation_count"] == 2
+    status = json.loads((round1 / "citation_chase_status.json").read_text())
+    assert status == {
+        "mode": "semantic-scholar-fallback",
+        "graph_verified": True,
+        "openalex_status": "failed",
+        "semantic_scholar_status": "completed",
+        "reason": "OpenAlex unavailable",
+    }
+
+
+# --- both graph providers fail → explicit degraded mode ---------------------
+
+def test_both_graph_providers_fail_downgrades_and_continues(monkeypatch, tmp_path):
     round1 = tmp_path / "round1"
     # Seeds carry a DOI only (no refs), forcing a re-hydrate call — which raises.
     _write_slice(round1, "anchor", [
@@ -392,25 +495,32 @@ def test_all_openalex_error_exits_40(monkeypatch, tmp_path):
         raise RuntimeError("network down")
     monkeypatch.setattr(lit_search, "openalex_works_by_id", boom)
     monkeypatch.setattr(lit_search, "openalex_cites", lambda wid, limit=10: [])
-    # subprocess must never run — the chase fails before writing a slice.
+    _stub_s2_failure(monkeypatch)
+    # No new slice means there is no need to re-run the child fetch/gate steps.
     def no_child(*a, **k):
-        raise AssertionError("no child process on a fail-closed chase")
+        raise AssertionError("no child process when degraded without new rows")
     monkeypatch.setattr(citation_chase.subprocess, "run", no_child)
 
     rc = citation_chase.main(["--run-dir", str(tmp_path), "--topic", "t"])
-    assert rc == citation_chase.CHASE_OPENALEX_UNREACHABLE
-    assert rc == 40
+    assert rc == 0
     note = (round1 / "citation_chase.md").read_text()
-    assert "unreachable" in note.lower()
+    assert "degraded" in note.lower()
+    assert "openalex" in note.lower()
+    assert "semantic scholar" in note.lower()
+    status = json.loads((round1 / "citation_chase_status.json").read_text())
+    assert status["mode"] == "degraded"
+    assert status["graph_verified"] is False
+    assert status["openalex_status"] == "failed"
+    assert status["semantic_scholar_status"] == "failed"
     assert not (round1 / "slice_citation.jsonl").exists()
 
 
-# --- fail-closed: a real OpenAlexError → exit 40, not 41/0 ------------------
+# --- a real OpenAlexError also enters the provider cascade ------------------
 
-def test_openalex_error_from_helper_exits_40(monkeypatch, tmp_path):
-    # BUG S2 end-to-end: a server HTTP error surfaces as lit_search.OpenAlexError
-    # from the helper. citation_chase must count it as a failed attempt and exit
-    # 40 (OpenAlex unreachable), NOT mislabel it 41 (no seeds) or 0.
+def test_openalex_error_from_helper_enters_degraded_mode_if_s2_fails(monkeypatch, tmp_path):
+    # A server HTTP error surfaces as lit_search.OpenAlexError from the helper.
+    # citation_chase must count it as a provider failure and enter the fallback
+    # cascade, then make the final degraded state explicit when S2 also fails.
     round1 = tmp_path / "round1"
     _write_slice(round1, "anchor", [
         {"url": "https://doi.org/10.1/a", "doi": "10.1/a",
@@ -421,14 +531,16 @@ def test_openalex_error_from_helper_exits_40(monkeypatch, tmp_path):
         raise lit_search.OpenAlexError("OpenAlex HTTP 503")
     monkeypatch.setattr(lit_search, "openalex_works_by_id", raise_oa)
     monkeypatch.setattr(lit_search, "openalex_cites", lambda wid, limit=10: [])
+    _stub_s2_failure(monkeypatch)
 
     def no_child(*a, **k):
-        raise AssertionError("no child process on a fail-closed chase")
+        raise AssertionError("no child process when degraded without new rows")
     monkeypatch.setattr(citation_chase.subprocess, "run", no_child)
 
     rc = citation_chase.main(["--run-dir", str(tmp_path), "--topic", "t"])
-    assert rc == citation_chase.CHASE_OPENALEX_UNREACHABLE
-    assert rc == 40
+    assert rc == 0
+    status = json.loads((round1 / "citation_chase_status.json").read_text())
+    assert status["mode"] == "degraded"
     assert not (round1 / "slice_citation.jsonl").exists()
 
 
@@ -466,9 +578,9 @@ def test_openalex_call_ceiling_bounds_requests(monkeypatch, tmp_path):
     assert cites_calls["n"] <= 2
 
 
-# --- fail-closed: exit 41 (no resolvable seed) ------------------------------
+# --- no resolvable seed also attempts fallback, then degrades ----------------
 
-def test_no_resolvable_seed_exits_41(monkeypatch, tmp_path):
+def test_no_resolvable_seed_downgrades_after_s2_no_match(monkeypatch, tmp_path):
     round1 = tmp_path / "round1"
     # Seeds carry a DOI (so they enter the seed set) but re-hydration returns
     # nothing usable — no bare id, no refs anywhere → nothing to chase.
@@ -478,13 +590,18 @@ def test_no_resolvable_seed_exits_41(monkeypatch, tmp_path):
     ])
     monkeypatch.setattr(lit_search, "openalex_works_by_id", lambda ids: [])
     monkeypatch.setattr(lit_search, "openalex_cites", lambda wid, limit=10: [])
+    monkeypatch.setattr(lit_search, "semantic_scholar_papers_by_id", lambda ids: [])
+    monkeypatch.setattr(lit_search, "semantic_scholar_references", lambda *_a, **_k: [])
+    monkeypatch.setattr(lit_search, "semantic_scholar_cites", lambda *_a, **_k: [])
     def no_child(*a, **k):
-        raise AssertionError("no child process on a fail-closed chase")
+        raise AssertionError("no child process when degraded without new rows")
     monkeypatch.setattr(citation_chase.subprocess, "run", no_child)
 
     rc = citation_chase.main(["--run-dir", str(tmp_path), "--topic", "t"])
-    assert rc == citation_chase.CHASE_NO_SEEDS
-    assert rc == 41
+    assert rc == 0
+    status = json.loads((round1 / "citation_chase_status.json").read_text())
+    assert status["mode"] == "degraded"
+    assert status["semantic_scholar_status"] == "no-resolvable-seeds"
     assert not (round1 / "slice_citation.jsonl").exists()
 
 

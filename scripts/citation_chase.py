@@ -33,15 +33,15 @@ are written to round1/slice_citation.jsonl via slice_search._anchor_item (so eac
 gets the same tier + authority_tag as an anchor row), then fetch_fulltext and the
 evidence gate run over the now-larger corpus.
 
-WHAT IT WRITES: only round1/slice_citation.jsonl (gate-visible) and a short
-round1/citation_chase.md note. ZERO Bible prose: expanding the corpus is its whole
-job; synthesis is someone else's.
+WHAT IT WRITES: round1/slice_citation.jsonl (when graph expansion adds works), a
+short round1/citation_chase.md note, and round1/citation_chase_status.json. ZERO
+Bible prose: expanding the corpus is its whole job; synthesis is someone else's.
 
-FAIL CLOSED: two distinct nonzero exit codes so the pipeline can tell "could not
-run" apart from "ran, nothing new" (exit 0). If EVERY OpenAlex request fails
-(network down) → CHASE_OPENALEX_UNREACHABLE. If NO seed yields a resolvable id or
-references → CHASE_NO_SEEDS. A genuine "seeds produced no NEW works after dedupe"
-writes an na note and returns 0.
+PROVIDER CASCADE: OpenAlex is primary. If it is unavailable or yields no usable
+seed graph, Semantic Scholar is attempted automatically. If that fallback also
+fails or cannot resolve a seed, the chase returns 0 in explicit DEGRADED mode and
+records graph_verified=false. Downstream stages must carry that limitation into
+the final report; the run never labels a skipped graph chase as verified.
 
 CHILD RETURN CODES: after writing the slice this shells out to fetch_fulltext.py
 then evidence_gate.py. The gate's exit is surfaced: 0 is clean; 22 (still thin /
@@ -74,12 +74,11 @@ if _ROOT not in sys.path:
 import config  # noqa: F401 — imported to mirror the sibling scripts' contract
 from scripts import lit_search, slice_search
 
-# FAIL-CLOSED exit codes. A required chase that cannot run must never resemble a
-# clean "ran, nothing new" pass (exit 0). Each "could not run" mode gets its own
-# distinct nonzero code, non-colliding with the neighbours' codes (evidence gate
-# 22, coverage_audit 30/31/32, slice_search 20/21).
-CHASE_OPENALEX_UNREACHABLE = 40  # every OpenAlex request failed (network down)
-CHASE_NO_SEEDS = 41              # no seed yielded a resolvable id / references
+# Retained for callers that imported the old constants. The default pipeline now
+# cascades to Semantic Scholar and then explicit degraded mode instead of emitting
+# these provider-specific failures.
+CHASE_OPENALEX_UNREACHABLE = 40
+CHASE_NO_SEEDS = 41
 
 # evidence_gate's FAIL verdict (corpus still too thin / a row failed re-validation).
 # Surfaced as a nonzero chase result: exit 0 is required before synthesis and a
@@ -90,6 +89,7 @@ GATE_FAIL_EXIT = 22
 FORWARD_TOP_SEEDS = 5
 # How many citing works the forward pass pulls per expanded seed. Small by design.
 FORWARD_LIMIT = 10
+S2_FALLBACK_SEEDS = 5
 
 
 def _read_jsonl(path):
@@ -170,6 +170,11 @@ def _row_bare_id(row):
     return ""
 
 
+def _row_s2_id(row):
+    """Semantic Scholar paper id carried by a row, if present."""
+    return str(row.get("semantic_scholar_id") or row.get("paper_id") or "").strip()
+
+
 def _identities(row):
     """ALL dedupe identities a corpus row exposes — BOTH ``doi:<normDOI>`` (when a
     DOI is present) AND ``oa:<bareWid>`` (when an openalex_id/openalex.org url is
@@ -182,6 +187,9 @@ def _identities(row):
     bare = _row_bare_id(row)
     if bare:
         out.add(f"oa:{bare}")
+    s2_id = _row_s2_id(row)
+    if s2_id:
+        out.add(f"s2:{s2_id}")
     return out
 
 
@@ -216,6 +224,268 @@ def _hydrate_batch_reqs(ids):
             if b:
                 bare.add(b)
     return (len(bare) + 49) // 50 + (len(dois) + 49) // 50
+
+
+def _s2_seed_input(row):
+    paper_id = _row_s2_id(row)
+    if paper_id:
+        return paper_id
+    doi = _row_doi(row)
+    return f"DOI:{doi}" if doi else ""
+
+
+def _s2_work_identities(work):
+    out = set()
+    doi = lit_search._normalize_doi(work.get("doi"))
+    if doi:
+        out.add(f"doi:{doi}")
+    paper_id = str(work.get("paper_id") or "").strip()
+    if paper_id:
+        out.add(f"s2:{paper_id}")
+    return out
+
+
+def _citation_row_from_s2(work, source, cocitation_count):
+    """Map a normalized Semantic Scholar work to the gate-visible slice schema."""
+    paper_id = str(work.get("paper_id") or "").strip()
+    doi = lit_search._normalize_doi(work.get("doi"))
+    if doi:
+        url = f"https://doi.org/{doi}"
+    elif paper_id:
+        url = f"https://www.semanticscholar.org/paper/{paper_id}"
+    else:
+        return None
+    row = slice_search._anchor_item({
+        "title": work.get("title"),
+        "doi": doi or None,
+        "year": work.get("year"),
+        "cited_by": work.get("cited_by"),
+        "authors": work.get("authors") or [],
+        "venue": work.get("venue"),
+    })
+    if row is None:
+        # _anchor_item needs a DOI or id. A DOI-less S2 paper still has a stable
+        # public URL, so supply the minimal gate-valid row directly.
+        year = work.get("year")
+        row = {
+            "title": (work.get("title") or "").strip(),
+            "url": url,
+            "published_date": str(year) if year else None,
+            "author": (work.get("authors") or [None])[0],
+            "highlights": [],
+            "tier": slice_search.tier_of(url, work.get("venue")),
+            "slice": "anchor",
+        }
+        row["authority_tag"] = slice_search.authority_tag(row)
+    row["url"] = url
+    row["slice"] = "citation"
+    row["semantic_scholar_id"] = paper_id
+    row["citation_provider"] = "semantic_scholar"
+    row["citation_source"] = source
+    row["cocitation_count"] = cocitation_count
+    return row
+
+
+def _write_status(round1_dir, *, mode, graph_verified, openalex_status,
+                  semantic_scholar_status, reason):
+    status = {
+        "mode": mode,
+        "graph_verified": bool(graph_verified),
+        "openalex_status": openalex_status,
+        "semantic_scholar_status": semantic_scholar_status,
+        "reason": reason,
+    }
+    try:
+        (round1_dir / "citation_chase_status.json").write_text(
+            json.dumps(status, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _merge_citation_rows(round1_dir, rows):
+    slice_path = round1_dir / "slice_citation.jsonl"
+    prior_rows = _read_jsonl(slice_path) if slice_path.exists() else []
+    merged = []
+    seen = set()
+    for row in prior_rows + rows:
+        identities = _identities(row)
+        if identities and identities & seen:
+            continue
+        seen |= identities
+        merged.append(row)
+    with slice_path.open("w", encoding="utf-8") as handle:
+        for row in merged:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return slice_path, len(prior_rows)
+
+
+def _run_children(run_dir):
+    ft_rc = subprocess.run(
+        [sys.executable, str(Path(_ROOT) / "scripts" / "fetch_fulltext.py"),
+         "--run-dir", str(run_dir)]
+    ).returncode
+    if ft_rc != 0:
+        print(f"  citation-chase: fetch_fulltext returned {ft_rc} (non-fatal).",
+              file=sys.stderr)
+    gate_rc = subprocess.run(
+        [sys.executable, str(Path(_ROOT) / "scripts" / "evidence_gate.py"),
+         "--run-dir", str(run_dir)]
+    ).returncode
+    if gate_rc == GATE_FAIL_EXIT:
+        print(f"  citation-chase: evidence gate returned exit {gate_rc} (corpus "
+              "still too thin or a row failed re-validation).", file=sys.stderr)
+    elif gate_rc != 0:
+        print(f"  citation-chase: evidence gate returned exit {gate_rc} (not a pass).",
+              file=sys.stderr)
+    return gate_rc
+
+
+def _semantic_scholar_fallback(*, round1_dir, run_dir, seeds, corpus_identities,
+                               max_candidates, forward, reason):
+    """Run a bounded S2 citation chase, or record an explicit degraded mode."""
+    inputs = []
+    for seed in seeds:
+        value = _s2_seed_input(seed)
+        if value and value not in inputs:
+            inputs.append(value)
+        if len(inputs) >= S2_FALLBACK_SEEDS:
+            break
+
+    def degrade(s2_status, detail):
+        note = (
+            "Citation chase DEGRADED: OpenAlex could not complete and Semantic "
+            f"Scholar {detail}. Citation-graph expansion is unverified; continue "
+            "with the evidence-gated base corpus and carry this limitation into "
+            "synthesis, integration, and the final Research Bible."
+        )
+        _write_note(round1_dir, note)
+        _write_status(
+            round1_dir, mode="degraded", graph_verified=False,
+            openalex_status="failed", semantic_scholar_status=s2_status,
+            reason=reason,
+        )
+        print(f"  citation-chase: {note}", file=sys.stderr)
+        return 0
+
+    if not inputs:
+        return degrade("no-resolvable-seeds", "had no resolvable DOI or paper id")
+
+    try:
+        seed_works = lit_search.semantic_scholar_papers_by_id(inputs)
+    except Exception:  # noqa: BLE001 — provider failure is recorded, not hidden
+        return degrade("failed", "also failed")
+    if not seed_works:
+        return degrade("no-resolvable-seeds", "resolved no usable seed")
+
+    seed_works.sort(key=lambda work: -(work.get("cited_by") or 0))
+    cocite = Counter()
+    candidate_source = {}
+    candidate_meta = {}
+    graph_attempts = graph_failures = 0
+
+    for seed in seed_works[:S2_FALLBACK_SEEDS]:
+        paper_id = seed.get("paper_id")
+        if not paper_id:
+            continue
+        graph_attempts += 1
+        try:
+            references = lit_search.semantic_scholar_references(paper_id, limit=100)
+        except Exception:  # noqa: BLE001
+            graph_failures += 1
+            continue
+        for work in references:
+            candidate_id = str(work.get("paper_id") or "").strip()
+            if not candidate_id:
+                continue
+            cocite[candidate_id] += 1
+            candidate_source.setdefault(candidate_id, "backward")
+            candidate_meta[candidate_id] = work
+
+    if forward:
+        strong_ids = [work.get("paper_id") for work in seed_works[:FORWARD_TOP_SEEDS]
+                      if work.get("paper_id")]
+        if strong_ids:
+            graph_attempts += 1
+            try:
+                citing = lit_search.semantic_scholar_cites(
+                    strong_ids, limit=FORWARD_LIMIT * len(strong_ids))
+            except Exception:  # noqa: BLE001
+                graph_failures += 1
+                citing = []
+            for work in citing:
+                candidate_id = str(work.get("paper_id") or "").strip()
+                if not candidate_id:
+                    continue
+                candidate_source.setdefault(candidate_id, "forward")
+                candidate_meta[candidate_id] = work
+
+    if graph_attempts and graph_failures == graph_attempts:
+        return degrade("failed", "also failed")
+
+    candidate_ids = [paper_id for paper_id in candidate_source
+                     if not (_s2_work_identities(candidate_meta[paper_id])
+                             & corpus_identities)]
+    if not candidate_ids:
+        note = ("Citation chase completed via Semantic Scholar fallback; the graph "
+                "produced no new works after dedupe.")
+        _write_note(round1_dir, note)
+        _write_status(
+            round1_dir, mode="semantic-scholar-fallback", graph_verified=True,
+            openalex_status="failed", semantic_scholar_status="completed",
+            reason=reason,
+        )
+        print(f"  citation-chase: {note}")
+        return 0
+
+    try:
+        hydrated = lit_search.semantic_scholar_papers_by_id(candidate_ids)
+    except Exception:  # noqa: BLE001
+        hydrated = []
+    for work in hydrated:
+        paper_id = str(work.get("paper_id") or "").strip()
+        if paper_id:
+            candidate_meta[paper_id] = work
+
+    ranked = sorted(
+        candidate_ids,
+        key=lambda paper_id: (
+            -cocite.get(paper_id, 0),
+            -(candidate_meta[paper_id].get("cited_by") or 0),
+            -(candidate_meta[paper_id].get("year") or 0),
+        ),
+    )
+    rows = []
+    written = set()
+    for paper_id in ranked:
+        if len(rows) >= max_candidates:
+            break
+        work = candidate_meta[paper_id]
+        identities = _s2_work_identities(work)
+        if identities & corpus_identities or identities & written:
+            continue
+        row = _citation_row_from_s2(
+            work, candidate_source[paper_id], cocite.get(paper_id, 0))
+        if row is None:
+            continue
+        written |= _identities(row)
+        rows.append(row)
+
+    if not rows:
+        return degrade("failed", "could not materialize its graph candidates")
+
+    slice_path, n_prior = _merge_citation_rows(round1_dir, rows)
+    note = (
+        f"Citation chase added {len(rows)} new work(s) via Semantic Scholar fallback "
+        f"to {slice_path.name} ({n_prior} prior row(s) preserved)."
+    )
+    _write_note(round1_dir, note)
+    _write_status(
+        round1_dir, mode="semantic-scholar-fallback", graph_verified=True,
+        openalex_status="failed", semantic_scholar_status="completed",
+        reason=reason,
+    )
+    print(f"Citation chase: {note}")
+    return _run_children(run_dir)
 
 
 def main(argv=None):
@@ -280,7 +550,7 @@ def main(argv=None):
     # cites, wider-pool hydration, final hydration). The helpers RAISE
     # OpenAlexError / other errors on a real outage, so each call site wraps its
     # call in try/except and increments oa["failures"] by the request count it
-    # attempted. exit 40 fires iff there was >=1 attempt and EVERY attempt failed.
+    # attempted. A total outage triggers the Semantic Scholar fallback.
     oa = {"attempts": 0, "failures": 0}
 
     def _charge(reqs):
@@ -334,30 +604,29 @@ def main(argv=None):
             seed_refs.append((bare, bare_refs))
             seed_by_id[bare] = w
 
-    # FAIL CLOSED — could-not-run vs ran-nothing-found. Checked here (early bail
-    # after seed hydration) AND before every later na-style return, so a failure
-    # at the forward / wider-pool / final hydration sites also surfaces as exit 40.
+    # Detect a total OpenAlex outage at each early-return boundary. The provider
+    # cascade handles it: Semantic Scholar next, explicit degraded mode last.
     def _all_openalex_failed():
         return oa["attempts"] > 0 and oa["failures"] >= oa["attempts"]
 
-    def _unreachable_return():
-        note = ("Citation chase: every OpenAlex request failed (network "
-                "unreachable). Could not run; this is NOT a clean no-new-works pass.")
-        _write_note(round1_dir, note)
-        print(f"  citation-chase: {note}", file=sys.stderr)
-        return CHASE_OPENALEX_UNREACHABLE
+    def _fallback_return(reason="OpenAlex unavailable"):
+        return _semantic_scholar_fallback(
+            round1_dir=round1_dir,
+            run_dir=run_dir,
+            seeds=seeds,
+            corpus_identities=corpus_identities,
+            max_candidates=args.max_candidates,
+            forward=args.forward,
+            reason=reason,
+        )
 
     if _all_openalex_failed():
-        return _unreachable_return()
+        return _fallback_return()
 
     # If NO seed yielded a resolvable id/refs, there is nothing to chase.
     resolvable = [sid for sid, _ in seed_refs if sid]
     if not resolvable and not any(refs for _, refs in seed_refs):
-        note = ("Citation chase: no seed yielded a resolvable OpenAlex id or "
-                "referenced_works. Could not run; this is NOT a clean pass.")
-        _write_note(round1_dir, note)
-        print(f"  citation-chase: {note}", file=sys.stderr)
-        return CHASE_NO_SEEDS
+        return _fallback_return("OpenAlex produced no resolvable seeds")
 
     # ---- Step 3: BACKWARD co-citation frequency ----------------------------
     # Count how many seeds reference each bare W-id in common. A ref many seeds
@@ -424,11 +693,16 @@ def main(argv=None):
         # OpenAlex call failed" — a failed forward pass could have emptied the
         # forward candidates while backward was already empty.
         if _all_openalex_failed():
-            return _unreachable_return()
+            return _fallback_return()
         # Ran fine; the seeds simply produced no NEW works after dedupe.
         note = ("Citation chase: seeds produced no new works after dedupe "
                 "(na). Ran cleanly; nothing to add.")
         _write_note(round1_dir, note)
+        _write_status(
+            round1_dir, mode="openalex", graph_verified=True,
+            openalex_status="completed", semantic_scholar_status="not-needed",
+            reason="OpenAlex completed",
+        )
         print(f"  citation-chase: {note}")
         return 0
 
@@ -555,12 +829,17 @@ def main(argv=None):
 
     if not rows:
         # If every OpenAlex call failed, the empty result is an outage, not a
-        # clean pass — surface exit 40 rather than a false na.
+        # clean pass — trigger the provider cascade rather than a false na.
         if _all_openalex_failed():
-            return _unreachable_return()
+            return _fallback_return()
         note = ("Citation chase: candidates found but none could be hydrated "
                 "into rows (na). Ran cleanly; nothing to add.")
         _write_note(round1_dir, note)
+        _write_status(
+            round1_dir, mode="openalex", graph_verified=True,
+            openalex_status="completed", semantic_scholar_status="not-needed",
+            reason="OpenAlex completed",
+        )
         print(f"  citation-chase: {note}")
         return 0
 
@@ -571,20 +850,7 @@ def main(argv=None):
     # includes the prior citation rows, so a rerun never re-adds or overwrites a
     # work it added before. Prior rows are kept even if malformed lines are
     # skipped by _read_jsonl (best-effort), deduped by identity for safety.
-    slice_path = round1_dir / "slice_citation.jsonl"
-    prior_rows = _read_jsonl(slice_path) if slice_path.exists() else []
-    merged = []
-    seen = set()
-    for row in prior_rows + rows:
-        ident = _identities(row)
-        if ident and (ident & seen):
-            continue  # identity already written this pass — keep the first
-        seen |= ident
-        merged.append(row)
-    n_prior = len(prior_rows)
-    with slice_path.open("w", encoding="utf-8") as fh:
-        for row in merged:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    slice_path, n_prior = _merge_citation_rows(round1_dir, rows)
 
     _write_note(
         round1_dir,
@@ -593,33 +859,16 @@ def main(argv=None):
         f"(backward co-citation + {'forward' if args.forward else 'no forward'} pass). "
         f"OpenAlex requests used: {calls['used']}/{ceiling}.",
     )
+    _write_status(
+        round1_dir, mode="openalex", graph_verified=True,
+        openalex_status="completed", semantic_scholar_status="not-needed",
+        reason="OpenAlex completed",
+    )
     print(f"Citation chase: wrote {len(rows)} new works to {slice_path.name} "
           f"({n_prior} prior preserved; OpenAlex requests {calls['used']}/{ceiling}).")
 
     # ---- Step 9: fetch full text, then re-run the evidence gate ------------
-    ft_rc = subprocess.run(
-        [sys.executable, str(Path(_ROOT) / "scripts" / "fetch_fulltext.py"),
-         "--run-dir", str(run_dir)]
-    ).returncode
-    if ft_rc != 0:
-        # fetch_fulltext is fail-open (exit 0 always); a non-zero here is unusual
-        # but non-fatal to the chase — the slice is already written and gate-visible.
-        print(f"  citation-chase: fetch_fulltext returned {ft_rc} (non-fatal).",
-              file=sys.stderr)
-
-    gate_rc = subprocess.run(
-        [sys.executable, str(Path(_ROOT) / "scripts" / "evidence_gate.py"),
-         "--run-dir", str(run_dir)]
-    ).returncode
-    if gate_rc == 0:
-        return 0
-    if gate_rc == GATE_FAIL_EXIT:
-        print(f"  citation-chase: evidence gate returned exit {gate_rc} (corpus "
-              f"still too thin or a row failed re-validation).", file=sys.stderr)
-        return GATE_FAIL_EXIT
-    print(f"  citation-chase: evidence gate returned exit {gate_rc} (not a pass).",
-          file=sys.stderr)
-    return gate_rc
+    return _run_children(run_dir)
 
 
 def _write_note(round1_dir, message):
