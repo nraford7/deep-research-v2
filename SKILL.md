@@ -59,7 +59,7 @@ Round 1    RETRIEVE         slice_search.py → Exa slices (full text) + academi
               ↓             fetch_fulltext.py → download full text of EVERY source (keep longest; save raw)
               ↓             evidence_gate.py → MUST pass (exit 0) before any synthesis
               ↓             citation_chase.py → one-hop citation graph fill (co-citation + citing works), re-gate
-              ↓             coverage audit → deep-research-squad skill (DEFAULT: checklist + panel + verify) — coverage_audit.py is the single-model fallback — name expected-but-absent coverage, fill, re-gate
+              ↓             coverage audit → follow references/squad-audit.md (DEFAULT: checklist + panel + verify, dispatched inline) — coverage_audit.py is the single-model fallback — name expected-but-absent coverage, fill, re-gate
 Round 2    SYNTHESIZE       compare the corpus; emit the six EXACT headers (4 feed buckets)
               ↓
 Round 2.5  DEEPEN           deepen_questions.py → root-cause / consequence / gap answers
@@ -251,9 +251,10 @@ the chase returns `0`.
 corpus thick enough?"; this asks a different question: "for THIS scope, what coverage a
 competent reader would expect is still absent?"
 
-**DEFAULT — use the `deep-research-squad` skill.** Every run performs Step 1.5 via the
-`deep-research-squad` skill, not the single-model script. Invoke it now (it takes this
-same run dir). The squad runs a cheap mechanical scope-checklist pass (every technique
+**DEFAULT — follow the bundled squad procedure in `references/squad-audit.md`.** Every run
+performs Step 1.5 via that bundled procedure, not the single-model script. Read it now and
+execute it inline on this run dir: you (the deep-research orchestrator) dispatch the persona
+subagents yourself per that file — there is no separate skill to invoke. The squad runs a cheap mechanical scope-checklist pass (every technique
 the scope names + a disciplined sibling sweep for in-domain methods the scope forgot),
 THEN four isolated reader personas for the depth gaps a checklist can't see, merges
 (scope-named gaps cap-exempt), and adversarially verifies every gap with a per-gap
@@ -753,10 +754,11 @@ When `/deep-research [topic]` is invoked:
    citing-works expansion, then re-gate. Fail-closed exits: 0 = ran; 40 = OpenAlex unreachable;
    41 = no resolvable seeds; 22 = still thin. On any non-zero, surface the code, do NOT proceed
    as if expansion succeeded.
-5. **Coverage audit (DEFAULT: the `deep-research-squad` skill):** invoke `deep-research-squad`
-   on this run dir — checklist + sibling sweep + persona panel + per-gap adversarial verify,
-   then fills via `slice_search.py --add-slice`, re-gate. Writes the same `round1/coverage_gaps.md`.
-   FALLBACK (squad undispatchable): `coverage_audit.py --run-dir … --topic …`. Never run both.
+5. **Coverage audit (DEFAULT: the bundled squad procedure):** follow `references/squad-audit.md`
+   on this run dir — checklist + sibling sweep + persona panel + per-gap adversarial verify (you
+   dispatch the persona subagents inline), then fills via `slice_search.py --add-slice`, re-gate.
+   Writes the same `round1/coverage_gaps.md`. FALLBACK (no subagents available):
+   `coverage_audit.py --run-dir … --topic …`. Never run both.
    **Then repeat `fetch_fulltext.py --run-dir …`** — a SECOND full-text pass so the
    gap-slice sources the audit just added are pulled to full text too, not left as
    snippets (the first pass ran before the audit doubled the corpus). Fail-open, $0,
