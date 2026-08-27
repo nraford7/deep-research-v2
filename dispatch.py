@@ -5,8 +5,8 @@ Deeper Research Dispatcher — thin slices entry point.
 This is a slices-only orchestrator guide, not a runner. It validates the run mode,
 preflights the Exa retrieval key (`EXA_API_KEY`), and prints the ordered Round-1
 retrieval command sequence (scope → slice_search → evidence_gate → citation_chase →
-coverage_audit) that
-the SKILL.md orchestrator executes, plus a reminder that lint_background belongs in the
+the default squad coverage audit that
+the SKILL.md orchestrator executes. `coverage_audit.py` is fallback-only, plus a reminder that lint_background belongs in the
 Round-4 checklist. Round-1 live retrieval is Exa slices; there is no legacy model fleet
 and no built-in web-search provider.
 
@@ -89,9 +89,11 @@ def main():
           "exit (40 OpenAlex unreachable, 41 no resolvable seeds, 22 still thin) "
           "means it could not complete: do NOT proceed as if expansion succeeded, "
           "surface and resolve it.)")
-    print(f"  5. {_fmt(audit_cmd)}")
+    print("  5. DEFAULT coverage audit: follow references/squad-audit.md "
+          "(checklist + isolated panel + per-gap verification, then re-gate).")
+    print(f"     FALLBACK ONLY when native subagents are unavailable: {_fmt(audit_cmd)}")
     print("     (coverage_audit exit 0 = coverage verified; a NONZERO exit means "
-          "the audit could not complete or the corpus is still thin: do NOT "
+          "the fallback audit could not complete or the corpus is still thin: do NOT "
           "proceed to synthesis, surface and resolve it.)")
     print("Round 4 checklist step: python3 scripts/lint_background.py "
           f"{shlex.quote(str(run_dir / 'sections'))}")

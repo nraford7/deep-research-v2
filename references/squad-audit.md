@@ -1,6 +1,6 @@
 # Step 1.5 — Coverage audit ("the squad")
 
-> Bundled procedure of the deeper-research skill. This IS Step 1.5 — deeper-research runs it inline, dispatching the persona subagents itself via the Agent tool; it is **not** a separate skill and is never run standalone. Persona files live in `references/squad-personas/`. Runs automatically after citation-chase and the gate pass.
+> Bundled procedure of the deeper-research skill. This IS Step 1.5 — deeper-research runs it inline through the selected adapter's native subagent mechanism; it is **not** a separate skill and is never run standalone. Read `runtime-adapters.md` first and use one adapter for the whole run. Persona files live in `references/squad-personas/`. Runs automatically after citation-chase and the gate pass.
 
 A viewpoint-diverse coverage audit. The stock `coverage_audit.py` asks ONE model
 "what is missing?", so the gap list inherits that one model's blind spots. This
@@ -112,7 +112,9 @@ to notice the blind spot:
 - **Clinical / therapy / counseling / behavior-change / coaching topics**
   (motivational interviewing, psychotherapy, CBT, health-behavior, goal
   elicitation as clinical practice) → recommend **William R. Miller** (clinician,
-  interpretation), on retainer at `~/.claude/agent-roster/william-miller-clinician.md`.
+  interpretation), on retainer at the selected adapter's roster:
+  `~/.agents/agent-roster/william-miller-clinician.md` for Codex or
+  `~/.claude/agent-roster/william-miller-clinician.md` for Claude.
   He hunts the in-session process gaps the staff miss: change/sustain-talk
   evidence, fidelity measurement, and evocation-backfire conditions. Verified on
   the goal-elicitation smoke test (2026-08-26): the staff-only panel missed
@@ -123,7 +125,9 @@ When a consultant is recommended and accepted, it is a generating lens like any
 other: isolated subagent, same preamble, same 5-gap cap, its gaps merged and
 verified with the rest. If no trigger matches, skip the recommendation silently.
 
-Then ONE `AskUserQuestion`: "Want to meet your squad before they start?"
+Then use the selected host's supported interactive question flow: "Want to meet
+your squad before they start?" If no such mechanism exists, ask in ordinary chat;
+skip this optional question in headless runs.
 - **Run as-is (Recommended)** -- dispatch immediately (with any topic-matched
   consultant already recommended above included, unless the user drops them).
 - **Meet the team** -- show each full persona file (stance, process,
@@ -136,13 +140,14 @@ Then ONE `AskUserQuestion`: "Want to meet your squad before they start?"
   also be fully RECAST this way: a new character hired against the same job
   description.
 - **Bring in a consultant** -- the topic needs a specialist no staff seat
-  covers. FIRST check the retainer roster (`~/.claude/agent-roster/`) for a
+  covers. FIRST check the selected adapter's retainer roster (`~/.agents/agent-roster/`
+  for Codex; `~/.claude/agent-roster/` for Claude) for a
   past hire who fits. Otherwise write a one-line job description and present
   2-3 contrasting candidates: real famous people, historical figures, or
   well-known fictional characters who fit it (each: name, why they fit, what
   their package brings, one risk). The user hires one for this run
-  (temp hire); afterwards offer to keep them on retainer (save the persona to
-  `~/.claude/agent-roster/<name>.md`). Every hire is an interpretation of the
+  (temp hire); afterwards offer to keep them on the selected adapter's roster.
+  Every hire is an interpretation of the
   figure or character, never the real person, labeled as such in the file.
 
 SKIP this stage silently when: the run is headless/non-interactive, the user
@@ -152,10 +157,11 @@ is a generating lens like any other: isolated subagent, same preamble, same
 5-gap cap, and it plays its part: it speaks in its character's name and voice
 while its Output format stays binding.
 
-## Stage B: The panel (4 isolated subagents, parallel, one message)
+## Stage B: The panel (4 isolated subagents, parallel where slots allow)
 
-Dispatch four subagents IN ONE MESSAGE so they run concurrently. Each prompt is,
-in order:
+Dispatch one fresh native subagent per persona through the selected adapter. Run
+them concurrently only up to available host slots, then batch the remaining prompts
+without changing personas, prompts, or isolation. Each prompt is, in order:
 1. The SUBAGENT PROMPT PREAMBLE below, verbatim.
 2. The full text of ONE persona file from `references/squad-personas/`:
    `umberto-eco-academic.md`, `w-edwards-deming-practitioner.md`,
@@ -210,9 +216,10 @@ You are a single, isolated lens on this question. Rules:
 This is a union with dedup, NOT a consensus step. Never drop a gap because only
 one persona raised it: single-lens gaps are the reason the panel exists.
 
-## Stage D: Adversarial verification (1 subagent per merged gap, parallel)
+## Stage D: Adversarial verification (1 subagent per merged gap, batched by slots)
 
-For EACH merged gap, dispatch one verifier subagent: the full text of
+For EACH merged gap, dispatch one fresh verifier subagent (batched to available host
+slots): the full text of
 `references/squad-personas/karl-popper-verifier.md`, the one gap, and the Stage-A digest. The
 verifier tries to REFUTE the gap (already covered in the corpus, or out of
 scope) and returns `REFUTED: <evidence>` or `CONFIRMED: <refutation tried>`.
@@ -254,8 +261,10 @@ python3 scripts/fetch_fulltext.py --run-dir research/[slug]
 python3 scripts/evidence_gate.py --run-dir research/[slug]   # must exit 0
 ```
 
-Cost: the panel + verifiers run on the session's own subagents ($0 on
-subscription). Only fills touch the Exa ledger: worst case $0.04 x 8 = $0.32.
+Cost: under Codex or Claude Code, the panel + verifiers can use native
+subscription-backed subagents at $0 API cost. Under the generic fallback, they may use
+a metered configured provider and must be charged accordingly. Only fills touch the Exa
+ledger: worst case $0.04 x 8 = $0.32.
 
 ## Stage G: Second round (optional, hard cap 2 rounds)
 
@@ -277,8 +286,9 @@ End with BOTH notes, always:
 refuted, the dissent they defended, what they missed. A member with zero kept
 gaps is reported plainly, with a judgment on whether the SEAT (not the
 character) fits this topic class, which is the recast signal. For each
-consultant/temp hire, end with ONE question: keep them on the roster
-(`~/.claude/agent-roster/<name>.md`, appending a `## Track record` line: date,
+consultant/temp hire, end with ONE question: keep them on the selected adapter's roster
+(`~/.agents/agent-roster/<name>.md` for Codex; `~/.claude/agent-roster/<name>.md` for
+Claude), appending a `## Track record` line: date,
 topic, gaps kept, one-line verdict) or let them go. Staff reviews accumulate in
 `squad_audit.md` only.
 
@@ -295,7 +305,7 @@ topic, gaps kept, one-line verdict) or let them go. Staff reviews accumulate in
 
 | Failure | Prevention |
 |---|---|
-| Panel run as persona swaps in one context | Stage B: one fresh subagent per persona, dispatched in one parallel message |
+| Panel run as persona swaps in one context | Stage B: one fresh native subagent per persona; batch only when slots require it |
 | Personas skip "boring" scope-named techniques to chase signature gaps | Stage A.5: mechanical scope-checklist pass flags every named-but-absent item |
 | A real scope-named gap dropped for space | Stage C: `[checklist]` gaps are cap-exempt; only persona depth gaps compete for the cap |
 | Consensus flattening drops a single-lens gap | Stage C: union + dedup only; single-proposer gaps survive to verification |

@@ -175,7 +175,64 @@ def test_run_config_slice_xor_violation_raises(tmp_path):
         config.load_run_config(toml_paths=[p], env=_all_keys())
 
 
+def test_run_config_rejects_explicit_synthesis_when_no_provider_is_available(tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text('[defaults]\nsynthesis = "ghost"\n')
+    with pytest.raises(config.ConfigError, match="ghost.*synthesis"):
+        config.load_run_config(toml_paths=[path], env={})
+
+
 # --- adversary selection ------------------------------------------------------
+
+def test_adversary_excludes_the_actual_openai_synthesizer_family():
+    providers = {
+        "codex-sub": config.Provider("codex-sub", "cli", "", "", command="codex", family="openai"),
+        "chatgpt": config.Provider("chatgpt", "openai", "k", "m", family="openai"),
+        "claude": config.Provider("claude", "anthropic", "k", "m", family="anthropic"),
+    }
+    adversary, warning = config._resolve_adversary(
+        ["chatgpt", "claude"], providers, "codex-sub")
+    assert adversary == "claude"
+    assert warning is None
+
+
+def test_adversary_excludes_xai_and_openai_for_openai_synthesis():
+    providers = {
+        "codex-sub": config.Provider(
+            "codex-sub", "cli", "", "", command="codex", family="openai"),
+        "grok": config.Provider("grok", "openai", "k", "m", family="xai"),
+        "chatgpt": config.Provider("chatgpt", "openai", "k", "m", family="openai"),
+        "gemini": config.Provider("gemini", "gemini", "k", "m", family="google"),
+    }
+    adversary, warning = config._resolve_adversary(
+        ["grok", "chatgpt", "gemini"], providers, "codex-sub")
+    assert adversary == "gemini"
+    assert warning is None
+
+
+def test_adversary_fails_closed_when_openai_synthesis_has_only_xai_and_openai():
+    providers = {
+        "codex-sub": config.Provider(
+            "codex-sub", "cli", "", "", command="codex", family="openai"),
+        "grok": config.Provider("grok", "openai", "k", "m", family="xai"),
+        "chatgpt": config.Provider("chatgpt", "openai", "k", "m", family="openai"),
+    }
+    adversary, warning = config._resolve_adversary(
+        ["grok", "chatgpt"], providers, "codex-sub")
+    assert adversary == "codex-sub"
+    assert warning is not None
+
+
+def test_adversary_uses_host_family_when_synthesizer_is_absent(monkeypatch):
+    monkeypatch.setattr(config, "detect_host", lambda env=None: "codex")
+    providers = {
+        "chatgpt": config.Provider("chatgpt", "openai", "k", "m", family="openai"),
+        "claude": config.Provider("claude", "anthropic", "k", "m", family="anthropic"),
+    }
+    adversary, warning = config._resolve_adversary(
+        ["chatgpt", "claude"], providers, "missing")
+    assert adversary == "claude"
+    assert warning is None
 
 def test_adversary_picks_first_available_non_anthropic(tmp_path):
     # chain names codex (not configured) then grok (configured) -> picks grok
@@ -204,10 +261,11 @@ def test_adversary_all_anthropic_warns_and_falls_back(tmp_path):
 
 
 def test_adversary_skips_unconfigured_chain_entries(tmp_path):
-    # default chain grok/chatgpt/gemini, but only chatgpt configured -> picks chatgpt
+    # default chain grok/chatgpt/gemini, but only OpenAI/chatgpt is configured:
+    # it cannot count as an independent review of an OpenAI synthesis run.
     rc = config.load_run_config(toml_paths=[], env={"OPENAI_API_KEY": "sk-o"})
     assert rc.adversary == "chatgpt"
-    assert rc.adversary_warning is None
+    assert rc.adversary_warning is not None
 
 
 def test_adversary_default_chain_picks_grok_when_all_keys():

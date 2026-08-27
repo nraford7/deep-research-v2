@@ -9,6 +9,7 @@ import os
 import subprocess
 
 CLI_TIMEOUT_S = 1800  # CLI reports are long; generous timeout
+_CODEX_COLOR_VALUES = frozenset(("auto", "always", "never"))
 
 
 # 15-30k-word reports take well over the SDKs' ~10-minute default HTTP
@@ -121,6 +122,31 @@ def _complete_gemini(client, provider, system_prompt, user_prompt):
     raise RuntimeError(f"All Gemini models failed for provider '{provider.name}': {last}")
 
 
+def _validated_codex_extra_args(provider):
+    """Return the narrow set of Codex options safe for a read-only text call."""
+    args = list(provider.extra_args)
+    validated = []
+    index = 0
+    while index < len(args):
+        option = args[index]
+        if option == "--strict-config":
+            validated.append(option)
+            index += 1
+            continue
+        if option == "--color":
+            if index + 1 >= len(args) or args[index + 1] not in _CODEX_COLOR_VALUES:
+                raise ValueError(
+                    "Codex extra_args option '--color' requires one of: "
+                    "auto, always, never")
+            validated.extend((option, args[index + 1]))
+            index += 2
+            continue
+        raise ValueError(
+            f"Codex extra_args option '{option}' is not allowed; permitted options are "
+            "--strict-config and --color {auto,always,never}")
+    return validated
+
+
 def _cli_argv_and_input(provider, system_prompt, user_prompt):
     base = os.path.basename(provider.command)
     if base == "claude":
@@ -133,7 +159,8 @@ def _cli_argv_and_input(provider, system_prompt, user_prompt):
         argv = [provider.command, "exec"]
         if provider.model:
             argv += ["--model", provider.model]
-        argv += list(provider.extra_args)
+        argv += _validated_codex_extra_args(provider)
+        argv += ["--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "-"]
         return argv, f"{system_prompt}\n\n{user_prompt}"  # system prepended (no dedicated flag)
     argv = [provider.command] + list(provider.extra_args)
     return argv, f"{system_prompt}\n\n{user_prompt}"
@@ -146,6 +173,10 @@ def _complete_cli(client, provider, system_prompt, user_prompt):
     env.pop("ANTHROPIC_AUTH_TOKEN", None)  # gateway tokens take precedence over subscription
     env.pop("ANTHROPIC_BASE_URL", None)    # and a gateway base URL would misroute the call
     env.pop("OPENAI_API_KEY", None)
+    if os.path.basename(provider.command) == "codex":
+        env.pop("CODEX_API_KEY", None)
+        env.pop("CODEX_ACCESS_TOKEN", None)
+        env.pop("OPENAI_BASE_URL", None)
     proc = subprocess.run(argv, input=stdin_text, capture_output=True, text=True,
                           env=env, timeout=CLI_TIMEOUT_S)
     if proc.returncode != 0:
