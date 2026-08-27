@@ -18,6 +18,9 @@ Usage:
   python3 verify_citations.py research/topic/sections/ --output factcheck/citations.md
 
 Set CONTACT_EMAIL env var for the OpenAlex/Crossref "polite pool" — recommended.
+Citations resolve OpenAlex → Crossref → Semantic Scholar; the third is a fallback
+so an OpenAlex throttle spell (429s) can't leave a real citation unresolved.
+Set SEMANTIC_SCHOLAR_KEY (optional) to lift that fallback off the shared free rate.
 """
 
 import argparse
@@ -337,6 +340,8 @@ def probe_url(url: str) -> ProbeResult:
 CONTACT = os.environ.get("CONTACT_EMAIL", "anonymous@example.com")
 OPENALEX = "https://api.openalex.org"
 CROSSREF = "https://api.crossref.org"
+SEMANTIC_SCHOLAR = "https://api.semanticscholar.org/graph/v1"
+SS_KEY = os.environ.get("SEMANTIC_SCHOLAR_KEY")  # optional; raises the shared free-tier rate
 
 # Citation patterns — broadened to handle:
 #   [Smith, 2020]                 — solo author            (ACADEMIC)
@@ -519,6 +524,32 @@ def resolve_crossref(s, entry: str):
     return None
 
 
+def resolve_semantic_scholar(s, entry: str):
+    """Third resolver, tried only when OpenAlex AND Crossref both miss — an
+    independent index so an OpenAlex throttle spell (429s) can't leave an
+    otherwise-real citation unresolved. DOI lookup first, then title search.
+    Uses SEMANTIC_SCHOLAR_KEY (x-api-key header) when set for a higher rate."""
+    headers = {"x-api-key": SS_KEY} if SS_KEY else {}
+    fields = "title,year,citationCount,externalIds"
+    doi_match = DOI_RE.search(entry)
+    try:
+        if doi_match:
+            r = s.get(f"{SEMANTIC_SCHOLAR}/paper/DOI:{doi_match.group(0)}",
+                      params={"fields": fields}, headers=headers, timeout=15)
+            if r.ok:
+                return r.json()
+        title = entry[:240].replace("\n", " ")
+        r = s.get(f"{SEMANTIC_SCHOLAR}/paper/search",
+                  params={"query": title, "limit": 1, "fields": fields},
+                  headers=headers, timeout=15)
+        if r.ok:
+            data = r.json().get("data") or []
+            return data[0] if data else None
+    except requests.RequestException:
+        return None
+    return None
+
+
 def title_match(entry: str, resolved_title: str) -> float:
     if not resolved_title:
         return 0.0
@@ -554,6 +585,19 @@ def resolve_entry(s, entry: str):
             "title": title,
             "doi": cr.get("DOI"),
             "year": (cr.get("issued", {}).get("date-parts") or [[None]])[0][0],
+            "title_match": round(match, 2),
+        }
+    ss = resolve_semantic_scholar(s, entry)
+    if ss:
+        title = (ss.get("title") or "").strip()
+        match = title_match(entry, title)
+        return {
+            "source": "semantic_scholar",
+            "title": title,
+            "doi": (ss.get("externalIds") or {}).get("DOI"),
+            "id": ss.get("paperId"),
+            "cited_by": ss.get("citationCount"),
+            "year": ss.get("year"),
             "title_match": round(match, 2),
         }
     return None

@@ -17,6 +17,8 @@ from scripts.verify_citations import (
     extract_inline_cites,
     extract_bibliography,
     first_surname,
+    resolve_entry,
+    resolve_semantic_scholar,
 )
 from scripts.export import parse_bib_entries as export_parse_bib, to_bibtex_entry
 from scripts.classify_sources import parse_entries as classify_parse_entries, classify
@@ -221,6 +223,68 @@ The story of monetary policy in emerging markets begins in 1973.
       len(missing) == 1 and len(present) == 0)
 
 
+# --- RESOLVER FALLBACK CHAIN (OpenAlex → Crossref → Semantic Scholar) ---
+
+class _FakeResp:
+    def __init__(self, ok, payload):
+        self.ok = ok
+        self._payload = payload
+    def json(self):
+        return self._payload
+
+
+class _FakeSession:
+    """Routes .get() by URL substring so a resolver can be exercised offline.
+    `misses` = hosts that return an empty-but-ok result (simulates a throttle
+    that failed open to None); `hits` = host substring -> payload."""
+    def __init__(self, hits, misses=()):
+        self.hits = hits
+        self.misses = set(misses)
+        self.calls = []
+    def get(self, url, **kw):
+        self.calls.append(url)
+        for host, payload in self.hits.items():
+            if host in url:
+                return _FakeResp(True, payload)
+        if any(m in url for m in self.misses):
+            # ok=True but no results -> resolver returns None and falls through
+            return _FakeResp(True, {"results": [], "message": {"items": []}, "data": []})
+        return _FakeResp(False, {})
+
+
+def test_resolve_entry_falls_back_to_semantic_scholar():
+    # OpenAlex + Crossref both miss (throttle/no-hit); Semantic Scholar resolves it.
+    s = _FakeSession(
+        hits={"api.semanticscholar.org": {"data": [
+            {"title": "Attention Is All You Need", "year": 2017,
+             "citationCount": 99999, "paperId": "abc123",
+             "externalIds": {"DOI": "10.5555/vaswani"}}]}},
+        misses={"api.openalex.org", "api.crossref.org"},
+    )
+    out = resolve_entry(s, "Vaswani et al., Attention Is All You Need, 2017")
+    t("resolve_entry falls back to semantic_scholar when OpenAlex+Crossref miss",
+      out is not None and out["source"] == "semantic_scholar"
+      and out["doi"] == "10.5555/vaswani" and out["year"] == 2017)
+    t("semantic_scholar was only tried after OpenAlex and Crossref",
+      any("openalex" in u for u in s.calls) and any("crossref" in u for u in s.calls))
+
+
+def test_resolve_semantic_scholar_doi_lookup():
+    s = _FakeSession(hits={"paper/DOI:": {
+        "title": "A paper", "year": 2021, "citationCount": 5,
+        "paperId": "p1", "externalIds": {"DOI": "10.1234/x"}}})
+    out = resolve_semantic_scholar(s, "Something with a doi 10.1234/x in it")
+    t("resolve_semantic_scholar resolves via DOI endpoint",
+      out is not None and out.get("paperId") == "p1")
+
+
+def test_resolve_entry_returns_none_when_all_three_miss():
+    s = _FakeSession(hits={}, misses={"api.openalex.org", "api.crossref.org",
+                                      "api.semanticscholar.org"})
+    t("resolve_entry returns None when every resolver misses",
+      resolve_entry(s, "Nonexistent citation, 1899") is None)
+
+
 if __name__ == "__main__":
     print("Running parser tests…")
     test_inline_cite_formats()
@@ -236,4 +300,7 @@ if __name__ == "__main__":
     test_bibtex_key_no_collision()
     test_doi_normalization()
     test_compare_against_bib_ignores_section_prose()
+    test_resolve_entry_falls_back_to_semantic_scholar()
+    test_resolve_semantic_scholar_doi_lookup()
+    test_resolve_entry_returns_none_when_all_three_miss()
     print("\nAll parser tests passed.")
