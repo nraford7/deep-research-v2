@@ -381,6 +381,81 @@ def test_anchor_item_openalex_id_only_no_doi():
     assert row["url"] == "https://openalex.org/W7"
 
 
+def test_anchor_uses_openalex_without_calling_semantic_scholar(
+    monkeypatch, tmp_path
+):
+    work = {
+        "title": "Canonical work",
+        "id": "https://openalex.org/W42",
+        "doi": "10.1/canonical",
+        "year": 1999,
+    }
+    monkeypatch.setattr(
+        slice_search.lit_search, "query_openalex", lambda topic, limit: [work]
+    )
+
+    def unexpected_fallback(*args, **kwargs):
+        raise AssertionError("Semantic Scholar fallback should not run")
+
+    monkeypatch.setattr(
+        slice_search.lit_search, "query_semantic_scholar", unexpected_fallback
+    )
+
+    keys, unique, dropped = slice_search.run_anchor("topic", tmp_path)
+
+    assert keys == {"doi:10.1/canonical"}
+    assert (unique, dropped) == (1, 0)
+
+
+def test_anchor_falls_back_to_semantic_scholar_when_openalex_fails(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    def openalex_failure(*args, **kwargs):
+        raise RuntimeError("OpenAlex quota exhausted")
+
+    def semantic_success(topic, limit):
+        calls.append((topic, limit))
+        return [
+            {
+                "title": "Recovered work",
+                "id": "https://www.semanticscholar.org/paper/abc",
+                "doi": "10.2/recovered",
+                "year": 2005,
+            }
+        ]
+
+    monkeypatch.setattr(slice_search.lit_search, "query_openalex", openalex_failure)
+    monkeypatch.setattr(
+        slice_search.lit_search, "query_semantic_scholar", semantic_success
+    )
+
+    keys, unique, dropped = slice_search.run_anchor("topic", tmp_path)
+
+    assert calls == [("topic", 15)]
+    assert keys == {"doi:10.2/recovered"}
+    assert (unique, dropped) == (1, 0)
+
+
+def test_anchor_fails_open_only_after_both_scholarly_providers_fail(
+    monkeypatch, tmp_path, capsys
+):
+    def provider_failure(*args, **kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(slice_search.lit_search, "query_openalex", provider_failure)
+    monkeypatch.setattr(
+        slice_search.lit_search, "query_semantic_scholar", provider_failure
+    )
+
+    result = slice_search.run_anchor("topic", tmp_path)
+
+    assert result == (set(), 0, 0)
+    assert (tmp_path / "slice_anchor.jsonl").read_text() == ""
+    assert "both providers failed" in capsys.readouterr().err
+
+
 def test_result_without_text_gets_zero_chars(monkeypatch, tmp_path, two_slice_cfg):
     session = FakeSession([_exa_body([_result("https://a.com/1")]),
                            _exa_body([_result("https://oecd.org/2")])])

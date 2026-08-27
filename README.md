@@ -59,7 +59,7 @@ See `SKILL.md` for the full architecture, prompt templates, and failure modes.
 
 ## What's new vs. a one-shot LLM
 
-- **Retrieval-first** — Round 1 fetches a real evidence corpus with Exa search slices (plus a free OpenAlex/Semantic Scholar academic anchor); later rounds reason over the fetched evidence, not the model's memory
+- **Retrieval-first** — Round 1 fetches a real evidence corpus with Exa search slices (plus a free OpenAlex-first academic anchor with automatic Semantic Scholar fallback); later rounds reason over the fetched evidence, not the model's memory
 - **Hard evidence gate** — synthesis is refused (exit 22) unless the corpus clears minimum unique-source and non-empty-slice thresholds and every row re-validates
 - **Question-driven deepening** — root-cause / consequence / gap questions (3/3/3, cap 9) chased with Exa `deep-reasoning`
 - **Ledger-capped retrieval** — a per-run money ledger (default $1) pre-charges each Exa call and reconciles the actual; a cap breach exits 21, never silently retries

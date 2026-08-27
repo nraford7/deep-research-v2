@@ -398,21 +398,57 @@ def _anchor_item(work):
 
 
 def run_anchor(topic, round1_dir):
-    """Academic anchor via lit_search's query functions. $0 — never ledgered.
+    """Academic anchor with an OpenAlex → Semantic Scholar fallback. $0.
 
-    Fail-open like a slice: any error → empty anchor jsonl. Returns
+    Semantic Scholar is called only when OpenAlex fails or returns no usable
+    works. Fail-open only after both providers fail or return no results. Returns
     (unique_keys, unique_count, dropped)."""
     jsonl_path = round1_dir / "slice_anchor.jsonl"
     brief_path = round1_dir / "brief_anchor.md"
+    openalex_error = None
     try:
         oa = lit_search.query_openalex(topic, limit=15)
-        ss = lit_search.query_semantic_scholar(topic, limit=15)
-        works = lit_search.merge_results(oa, ss)[:15]
-    except Exception as exc:  # noqa: BLE001 — fail-open
-        _write_jsonl(jsonl_path, [])
-        _write_brief(brief_path, "anchor", [])
-        print(f"  ⚠ academic anchor failed open ({type(exc).__name__}: {exc})", file=sys.stderr)
-        return set(), 0, 0
+    except Exception as exc:  # noqa: BLE001 — automatic provider fallback
+        oa = []
+        openalex_error = exc
+
+    if oa:
+        works = lit_search.merge_results(oa)[:15]
+    else:
+        semantic_error = None
+        try:
+            ss = lit_search.query_semantic_scholar(topic, limit=15)
+        except Exception as exc:  # noqa: BLE001 — final fail-open boundary
+            ss = []
+            semantic_error = exc
+        if ss:
+            reason = type(openalex_error).__name__ if openalex_error else "no results"
+            print(
+                f"  ⚠ OpenAlex anchor unavailable ({reason}); "
+                "using Semantic Scholar fallback",
+                file=sys.stderr,
+            )
+            works = lit_search.merge_results(ss)[:15]
+        else:
+            details = []
+            if openalex_error:
+                details.append(f"OpenAlex {type(openalex_error).__name__}: {openalex_error}")
+            else:
+                details.append("OpenAlex returned no results")
+            if semantic_error:
+                details.append(
+                    f"Semantic Scholar {type(semantic_error).__name__}: {semantic_error}"
+                )
+            else:
+                details.append("Semantic Scholar returned no results")
+            _write_jsonl(jsonl_path, [])
+            _write_brief(brief_path, "anchor", [])
+            print(
+                "  ⚠ academic anchor failed open after both providers failed "
+                f"or returned no results ({'; '.join(details)})",
+                file=sys.stderr,
+            )
+            return set(), 0, 0
 
     seen = set()
     items = []

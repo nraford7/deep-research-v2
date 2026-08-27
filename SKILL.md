@@ -162,8 +162,9 @@ runnable as-printed (topic, run-dir, and the retrieval cap are threaded through)
 
 **Step 1.2 — retrieve.** `slice_search.py` fires one Exa `/search` per ENABLED slice,
 tiers + dedupes results, and writes `round1/slice_<name>.jsonl`, `round1/brief_<name>.md`,
-and `round1/evidence_manifest.json`. It also writes a free OpenAlex/Semantic Scholar
-academic anchor (`slice_anchor.jsonl`, $0 — never ledgered).
+and `round1/evidence_manifest.json`. It also writes a free academic anchor
+(`slice_anchor.jsonl`, $0 — never ledgered), using OpenAlex first and automatically
+falling back to Semantic Scholar when OpenAlex fails or returns no usable works.
 
 Each Exa slice now also requests **full page/PDF text** (`contents.text`, capped at
 `DR_TEXT_MAX_CHARS`, default 12k). That text is spilled to `round1/sources/<file>.txt`
