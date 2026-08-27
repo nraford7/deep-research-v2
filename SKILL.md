@@ -632,6 +632,36 @@ subscription subagent) are covered separately by `--max-cost-usd` on those calls
 `scripts/cost.py` estimates them. Exit `21` on any retrieval cap breach — surface it,
 raise the cap, and `--resume`; never silently retry.
 
+## Model selection by role (Tier 1 hybrid — cost)
+
+Reasoning quality is not needed equally in every round, so do not run the whole
+pipeline on one top-tier model. Only two roles genuinely need the strongest model;
+the rest are bounded or mechanical and run well on a cheaper one. The Agent/subagent
+dispatch already accepts a `model:` override — use it **per role** instead of letting
+every subagent inherit the session model.
+
+**Default policy (the "Tier 1" hybrid — no quality regret):**
+
+| Role | Model | Why |
+|---|---|---|
+| **Synthesis (Round 2)** | strongest (e.g. `opus`) | Sets the field map + six-header frame the whole Bible inherits; a *single* call, so keeping it strong is cheap |
+| **Integration sections (Round 3)** | strongest (e.g. `opus`) | The narrative-explainer prose the reader actually reads, and the biggest token sink; faithful argument reconstruction matters |
+| Squad coverage audit (personas + checklist) | cheaper (e.g. `sonnet`) | Bounded gap-finding (≤5 gaps/lens); a checklist pass is mechanical |
+| Fix pass (apply adversary edits, Round 4) | cheaper (e.g. `sonnet`) | Mechanical corrections against a findings list |
+| Scope (Round 0), glue/orchestration | cheaper (e.g. `sonnet`) | Trivial classification / bookkeeping |
+| Refute adversary (Round 4) | **different family** (e.g. `gpt-5.1`) | Must differ from the synthesizer's family; unchanged by this policy |
+
+**How to apply it:** set the *session* model to the cheaper model (the glue default),
+then dispatch the synthesis and integration subagents with an explicit
+`model: <strongest>` override. In a headless run (`claude -p --model sonnet …`) the
+orchestrator MUST bump those two roles up per this table — the launch prompt should say
+so explicitly, since a headless instance follows instructions rather than re-deriving
+this. Rough effect vs. all-strongest: ≈20–25% cheaper with prose quality fully
+preserved (only squad + fix-pass + glue move down). A more aggressive tier that also
+runs *integration* on the cheaper model saves ≈60–70% but flattens the prose and leaves
+more overclaims for the adversary/fix pass to clean up — use it only for exploratory
+first-pass breadth, then re-run the winners with integration on the strongest model.
+
 ## No-WebFetch rule (applies to every subagent in this pipeline)
 
 **Never use WebFetch — in the orchestrator, in subagents, or in a CLI subprocess
@@ -713,6 +743,51 @@ enables Bash/Edit/Write in your cwd — avoid it for unattended subprocesses.
 - User says `/deeper-research [topic]`.
 - User needs a literature review, state-of-knowledge summary, or authoritative reference.
 - Any research task where accuracy, citation quality, and completeness outweigh speed.
+
+## Batch: parallel headless runs over many questions
+
+You do NOT have to open a session per question. Point the pipeline at **a list of
+questions** — a chapter of research questions, a file with one question per line, or any
+set of sub-questions — and fan out **one headless `claude -p` session per question, in
+parallel**, each running the full pipeline into its own run dir. Every session is fully
+isolated (its own context, its own Exa ledger, its own `research/<slug>/` folder), so
+they don't interfere; a concurrency cap keeps you under API/Exa rate limits.
+
+**The general recipe** (loop your questions → launch capped background sessions):
+
+```bash
+CONC=3                                   # how many to run at once
+while IFS= read -r q; do
+  slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
+  dir="research/$slug"; mkdir -p "$dir"
+  [ -f "$dir/RESEARCH-BIBLE.md" ] && { echo "skip $slug"; continue; }   # resumable
+  ( claude -p --dangerously-skip-permissions --model sonnet \
+      "Use the deeper-research skill to run the FULL pipeline for this question and \
+write RESEARCH-BIBLE.md into the run dir $dir. Apply the Tier 1 model policy: dispatch \
+the synthesis and integration subagents with model:opus, everything else on sonnet. \
+Source ~/.env first. Headless: skip Stage-0 framing. QUESTION: $q" \
+  ) > "research/_batch/logs/$slug.log" 2>&1 &
+  while [ "$(jobs -rp | wc -l)" -ge "$CONC" ]; do sleep 5; done   # throttle
+done < questions.txt
+wait
+```
+
+Notes that make a batch behave:
+- **`--dangerously-skip-permissions`** is what lets each session run bash/Exa/curl
+  unattended; scope it to a research working dir. (The No-WebFetch rule still holds.)
+- **Concurrency 3–4** is usually right — more just queues behind API/Exa rate limits.
+- **Resumable:** skip any question whose run dir already has `RESEARCH-BIBLE.md`.
+- **Model:** launch with `--model sonnet` (the glue default) and instruct per-role Opus
+  for synthesis + integration — see *Model selection by role* above.
+- **Monitor:** `tail -f research/_batch/logs/*.log` or
+  `watch 'find research -name RESEARCH-BIBLE.md | wc -l'`.
+- **Cost scales linearly:** each question ≈ its own retrieval ledger (~$0.5–0.8 Exa) plus
+  its LLM legs. Ten questions ≈ ten independent runs.
+- **OpenAlex flakiness** (verifier stall / `citation_chase` exit 40) can hit any run; tell
+  each session to surface it and continue rather than block.
+
+A ready-made driver for a guide-structured project lives alongside this pattern — see the
+project's `research/_tools/` (a chapter/question extractor + a capped fan-out script).
 
 ## Benchmark quickstart
 

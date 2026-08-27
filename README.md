@@ -189,6 +189,55 @@ place; a new sub-topic just joins the index. Both are incremental — only chang
 sections re-embed. If the deps or `OPENAI_API_KEY` are missing, indexing/search
 print a one-line notice and exit 0 — core research is unaffected.
 
+## Model selection by role (cost)
+
+Only two rounds need a top-tier model; the rest are bounded or mechanical. The
+subagent dispatch accepts a `model:` override, so pick per role instead of running the
+whole pipeline on one model (the **Tier 1 hybrid**):
+
+| Role | Model |
+|---|---|
+| Synthesis (Round 2) | strong, e.g. `opus` — sets the field-map frame; a single call |
+| Integration sections (Round 3) | strong, e.g. `opus` — the prose you read, and the biggest token sink |
+| Squad audit, fix-pass, scoping, glue | cheap, e.g. `sonnet` |
+| Refute adversary (Round 4) | different family, e.g. `gpt-5.1` — unchanged |
+
+Run the session on the cheap model and bump synthesis + integration up to the strong
+one. Effect vs. all-strong: ≈20–25% cheaper with prose quality preserved. An aggressive
+variant that also runs integration on the cheap model saves ≈60–70% but flattens the
+prose — use it for first-pass breadth, then re-run the winners. Full table and the
+apply-in-headless note: *Model selection by role* in `SKILL.md`.
+
+## Batch: parallel headless runs over many questions
+
+You don't need a session per question. Point the pipeline at a **list of questions** —
+a chapter of research questions, or a file with one question per line — and fan out
+**one headless `claude -p` session per question, in parallel**. Each is fully isolated
+(its own context, its own Exa ledger, its own `research/<slug>/` folder), concurrency-
+capped to stay under API/Exa rate limits. General recipe:
+
+```bash
+CONC=3                                   # how many at once
+while IFS= read -r q; do
+  slug=$(echo "$q" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-48)
+  dir="research/$slug"; mkdir -p "$dir"
+  [ -f "$dir/RESEARCH-BIBLE.md" ] && continue                    # resumable: skip done
+  ( claude -p --dangerously-skip-permissions --model sonnet \
+      "Use the deeper-research skill: run the FULL pipeline for this question, write \
+RESEARCH-BIBLE.md into $dir, and dispatch synthesis+integration on model:opus. \
+Source ~/.env first. Headless: skip Stage-0 framing. QUESTION: $q" \
+  ) > "research/_batch/logs/$slug.log" 2>&1 &
+  while [ "$(jobs -rp | wc -l)" -ge "$CONC" ]; do sleep 5; done  # throttle
+done < questions.txt
+wait
+```
+
+`--dangerously-skip-permissions` lets each session run bash/Exa/curl unattended (the
+No-WebFetch rule still holds); skip any question whose folder already has a Bible
+(resumable); cost scales linearly (~$0.5–0.8 Exa/question plus its LLM legs). Monitor
+with `tail -f research/_batch/logs/*.log`. Full notes and knobs: *Batch: parallel
+headless runs over many questions* in `SKILL.md`.
+
 ## API keys
 
 | Env var | Purpose | Get a key |
