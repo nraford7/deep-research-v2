@@ -564,7 +564,7 @@ def main():
     ap.add_argument("path", help="Markdown file or directory")
     ap.add_argument("--output", default="verify-report.md", help="Where to write the report")
     ap.add_argument("--check-urls", action="store_true", help="HEAD-check every URL (slow)")
-    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--workers", type=int, default=2)
     args = ap.parse_args()
 
     s = session()
