@@ -49,10 +49,13 @@ def main():
     # Load env (.env merge) so EXA_API_KEY set in a file is honored.
     env = cfg.load_env_files()
 
-    # Preflight the retrieval key — slices cannot run without Exa.
-    if not env.get("EXA_API_KEY"):
+    # Preflight the retrieval key — slices cannot run without Exa. A custom
+    # EXA_BASE_URL (proxy/gateway) may authenticate out-of-band, in which
+    # case a missing EXA_API_KEY is not fatal.
+    if not env.get("EXA_API_KEY") and not env.get("EXA_BASE_URL"):
         print("ERROR: EXA_API_KEY is not set. Round-1 retrieval uses Exa slices; "
-              "export EXA_API_KEY (or add it to ~/.env) before running.", file=sys.stderr)
+              "export EXA_API_KEY (or add it to ~/.env), or set EXA_BASE_URL to "
+              "an Exa-compatible endpoint with out-of-band auth.", file=sys.stderr)
         raise SystemExit(20)
 
     run_dir = Path(args.run_dir)

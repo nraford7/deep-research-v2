@@ -88,7 +88,11 @@ import config
 from scripts.cost import RETRIEVAL_FEES, RETRY_MULTIPLIER
 from scripts.ledger import RetrievalLedger, LedgerCapExceeded
 
-EXA_SEARCH_URL = "https://api.exa.ai/search"
+# Base URL override for Exa-compatible endpoints (proxies, gateways). When
+# EXA_BASE_URL is set, the x-api-key header is optional (auth may be
+# out-of-band).
+EXA_BASE_URL = os.environ.get("EXA_BASE_URL", "https://api.exa.ai").rstrip("/")
+EXA_SEARCH_URL = EXA_BASE_URL + "/search"
 EXA_PREFLIGHT_EXIT = 20
 
 # 3 per bucket, cap 9 total (Phase-A rule 1).
@@ -421,10 +425,13 @@ def main(argv=None):
         return 0
 
     # PREFLIGHT — only hard-fail when we are actually about to call Exa.
+    # A custom EXA_BASE_URL (proxy/gateway) may authenticate out-of-band, in
+    # which case a missing EXA_API_KEY is not fatal.
     api_key = os.environ.get("EXA_API_KEY", "")
-    if not api_key:
+    if not api_key and not os.environ.get("EXA_BASE_URL"):
         print("EXA_API_KEY is not set — cannot run Exa deep-reasoning. "
-              "Export EXA_API_KEY and re-run.", file=sys.stderr)
+              "Export EXA_API_KEY and re-run, or set EXA_BASE_URL to an "
+              "Exa-compatible endpoint.", file=sys.stderr)
         return EXA_PREFLIGHT_EXIT
 
     ledger = RetrievalLedger(run_dir, cap)
