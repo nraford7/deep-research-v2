@@ -28,6 +28,7 @@ retrieval_ledger.json
 .DS_Store
 .idea/
 .vscode/
+.worktrees/
 *.swp
 .kata.local.toml
 # roborev snapshots
