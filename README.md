@@ -22,6 +22,39 @@ Output     Hub-and-spoke Research Bible (Markdown + self-contained HTML) + BibTe
              + searchable semantic index spanning every topic in the project
 ```
 
+## Project-local run layout
+
+New runs are created under the project that launched them:
+`<project>/research/<run-slug>/`. If a `research/` directory already exists, each
+run becomes a new subdirectory there. Existing slugs require an explicit choice:
+Resume, Extend, Start fresh, or Cancel. Extensions inherit the full source corpus
+and provenance into a new child; completed parents remain unchanged and partial
+parents are frozen.
+
+```text
+research/<run-slug>/
+├── RESEARCH-BIBLE_<run-slug>.md
+├── RESEARCH-BIBLE_<run-slug>.html
+├── Sections/
+├── Sources/
+│   ├── bibliography.md
+│   ├── bibliography.bib
+│   ├── claims.jsonl
+│   └── Extracted/
+└── Process/
+    ├── scope.json
+    ├── retrieval_ledger.json
+    ├── round1/ … round5/
+    └── stages/
+```
+
+The HTML companion is automatic. An installed jimemo is preferred; when it is
+absent, all users still receive the bundled visually equivalent jimemo-style page.
+Legacy projects are migrated explicitly and immediately with
+`python3 scripts/run_manager.py migrate <project>`; add `--dry-run` to preview,
+or use `migration-recover` and `rollback-migration` for interrupted or reversed
+migrations. See `SKILL.md` for the managed lifecycle and compatibility commands.
+
 ## Lineage: inspired by deep-research, rebuilt evidence-first
 
 deeper-research began as [deep-research](https://github.com/nraford7/deep-research) and owes it the whole idea. The original runs five research strategies in parallel (academic, practitioner, real-time, grey-literature, contrarian), each driven by a different model provider, then triangulates their outputs on the principle that a fabricated citation rarely survives across three independent models. It works, and it still runs.

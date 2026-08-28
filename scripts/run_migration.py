@@ -309,7 +309,8 @@ def apply_migration(plan: MigrationPlan, *, crash_at: str | None = None) -> Path
         "completion_profile": "migrated-legacy", "sealed": False,
         "frozen_for_derivation": False, "frozen_snapshot": None,
         "generation": 1, "created_at": now, "updated_at": now,
-        "completed_at": None, "bible": bible,
+        "completed_at": None,
+        "bible": ({"markdown": bible, "html": None} if bible else None),
     }
     _atomic_json(stage / "Process" / "run.json", metadata)
     expected = _file_hashes(stage)

@@ -17,6 +17,82 @@ a "Research Bible."
 
 There is ONE pipeline. No model fleet, no `mode` flag other than `slices`.
 
+## Managed project-local runs (default)
+
+Capture the directory where the skill was launched and prepare the run before any
+artifact is written. Normal results always live at
+`<project>/research/<run-slug>`. If the launch directory itself is named
+`research`, it is already the library and no second `research/` is added.
+
+```bash
+python3 scripts/run_manager.py prepare \
+  --project-dir "$PROJECT" --question "$QUESTION" --slug "$SLUG" --json
+```
+
+Retain the returned run path, lease token, broker endpoint, and scratch directory
+through every stage. The managed run is read-only to workers: synthesis,
+integration, section, adversary-fix, and Bible drafts are created in scratch and
+published with `scripts/run_manager.py publish-artifact`; then record the stage.
+Renew the lease before long reasoning intervals. When a slug already exists,
+offer exactly these choices and do nothing until one is selected: **Resume**,
+**Extend**, **Start fresh**, or **Cancel**. Resume reuses validated stages; Extend
+creates a new child with the full inherited corpus and provenance while the prior
+Bible is orientation-only; Start fresh creates a timestamped sibling.
+
+The v2 run tree is:
+
+Extracted source bytes always live under `Sources/Extracted/`; process artifacts
+never share that reader-facing source home.
+
+```text
+<project>/research/<run-slug>/
+├── RESEARCH-BIBLE_<run-slug>.md
+├── RESEARCH-BIBLE_<run-slug>.html
+├── Sections/
+├── Sources/
+│   ├── bibliography.md
+│   ├── bibliography.bib
+│   ├── claims.jsonl
+│   └── Extracted/
+└── Process/
+    ├── scope.json
+    ├── retrieval_ledger.json
+    ├── round1/ … round5/
+    └── stages/
+```
+
+Export and finish through managed mode:
+
+```bash
+python3 scripts/export.py --run-dir "$RUN"
+python3 scripts/run_manager.py finalize \
+  --broker-endpoint "$BROKER" --lease-token "$TOKEN" --json
+python3 scripts/run_manager.py lease release \
+  --broker-endpoint "$BROKER" --lease-token "$TOKEN" --json
+python3 scripts/search.py index --root "$PROJECT/research"
+```
+
+The Markdown Bible is always retained. If compatible `jimemo` is installed it is
+used; otherwise the bundled visually equivalent jimemo-style renderer produces the
+same automatic HTML companion for every user.
+
+### Legacy migration and manual compatibility
+
+Migration is explicit but executes immediately by default. Point it at a legacy
+run, a `research` library, or a project; use `--dry-run` for a zero-write preview.
+
+```bash
+python3 scripts/run_manager.py migrate "$PROJECT" --json
+python3 scripts/run_manager.py migrate "$PROJECT" --dry-run --json
+python3 scripts/run_manager.py migration-recover "$PROJECT/research" --mode continue
+python3 scripts/run_manager.py migration-recover "$PROJECT/research" --mode abort
+python3 scripts/run_manager.py rollback-migration "$RUN"
+```
+
+The older physical helper commands below remain a clearly scoped legacy/manual
+interface. `--output-root` continues to mean a direct library, not a project; new
+normal orchestration should use `--project-dir` and the manager/broker workflow.
+
 ## Runtime adapter (required at invocation)
 
 Read [references/runtime-adapters.md](references/runtime-adapters.md) before

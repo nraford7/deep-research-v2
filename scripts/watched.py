@@ -15,8 +15,11 @@ Usage:
   python3 scripts/watched.py [--stale-secs 300] -- <command> [args...]
 
   python3 scripts/watched.py --stale-secs 300 -- \
-      python3 scripts/verify_citations.py research/slug/sections/ \
-      --output research/slug/round4/citation-verification.md --check-urls
+      python3 scripts/verify_citations.py research/slug/Sections/ \
+      --output research/slug/Process/round4/citation-verification.md --check-urls
+
+  Legacy/manual runs retain ``sections/`` and ``round4/`` through RunLayout's
+  compatibility branch.
 
 Exit codes: the child's own exit code on normal completion; 99 on a stall kill;
 2 on usage error.
