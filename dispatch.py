@@ -38,6 +38,8 @@ def main():
     parser.add_argument("--topic", required=True, help="Research topic")
     parser.add_argument("--scope", required=True, help="Detailed scope description")
     parser.add_argument("--run-dir", help="Existing managed, legacy, or deliberately prepared manual run")
+    parser.add_argument("--broker-endpoint", help="Existing v2 manager broker endpoint")
+    parser.add_argument("--lease-token", help="Existing v2 manager lease token")
     parser.add_argument("--project-dir", help="Project in which to create research/<slug>/")
     parser.add_argument("--slug", help="Topic-qualified run name (defaults from the question)")
     parser.add_argument("--question", help="Research question (defaults to --topic)")
@@ -74,6 +76,29 @@ def main():
                   file=sys.stderr)
             raise SystemExit(2)
         layout = resolve_helper_layout(run_dir)
+        if layout.kind is LayoutKind.V2:
+            if bool(args.broker_endpoint) != bool(args.lease_token):
+                print("ERROR: --broker-endpoint and --lease-token must be supplied together.",
+                      file=sys.stderr)
+                raise SystemExit(2)
+            if args.broker_endpoint:
+                broker_endpoint, lease_token = args.broker_endpoint, args.lease_token
+            else:
+                try:
+                    prepared = prepare_run(
+                        question=args.question or args.topic,
+                        slug=run_dir.name,
+                        library_dir=run_dir.parent,
+                        mode="resume",
+                    )
+                except ManagerError as exc:
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    raise SystemExit(int(exc.exit_code))
+                if prepared.action == "complete-noop":
+                    print(f"Run is already complete: {run_dir}")
+                    return
+                broker_endpoint = prepared.broker_endpoint
+                lease_token = prepared.lease_token
     else:
         try:
             prepared = prepare_run(
@@ -105,24 +130,36 @@ def main():
         return " ".join(shlex.quote(p) for p in parts)
 
     if layout.kind is LayoutKind.V2 and broker_endpoint and lease_token:
+        def _managed(helper, payload):
+            return ["python3", "scripts/run_manager.py", "invoke-helper",
+                    "--broker-endpoint", broker_endpoint,
+                    "--lease-token", lease_token,
+                    "--helper", helper, "--args-json",
+                    json.dumps(payload, separators=(",", ":"))]
         scope_cmd = ["python3", "scripts/run_manager.py", "invoke-helper",
                      "--broker-endpoint", broker_endpoint,
                      "--lease-token", lease_token,
                      "--helper", "scope", "--args-json", json.dumps({
                          "topic": args.topic, "scope": args.scope, "use_llm": False,
                      }, separators=(",", ":"))]
+        slice_payload = {"topic": args.topic}
+        if args.max_retrieval_usd is not None:
+            slice_payload["max_retrieval_usd"] = args.max_retrieval_usd
+        slice_cmd = _managed("slice-search", slice_payload)
+        chase_cmd = _managed("citation-chase", {"topic": args.topic})
+        audit_cmd = _managed("coverage-audit", {"topic": args.topic})
     else:
         scope_cmd = ["python3", "scripts/scope.py",
                      "--topic", args.topic, "--scope", args.scope,
                      "--output", str(layout.scope)]
-    slice_cmd = ["python3", "scripts/slice_search.py",
-                 "--topic", args.topic, "--run-dir", str(run_dir)] + cap_arg
+        slice_cmd = ["python3", "scripts/slice_search.py",
+                     "--topic", args.topic, "--run-dir", str(run_dir)] + cap_arg
+        chase_cmd = ["python3", "scripts/citation_chase.py",
+                     "--run-dir", str(run_dir), "--topic", args.topic]
+        audit_cmd = ["python3", "scripts/coverage_audit.py",
+                     "--run-dir", str(run_dir), "--topic", args.topic]
     gate_cmd = ["python3", "scripts/evidence_gate.py",
                 "--run-dir", str(run_dir)]
-    chase_cmd = ["python3", "scripts/citation_chase.py",
-                 "--run-dir", str(run_dir), "--topic", args.topic]
-    audit_cmd = ["python3", "scripts/coverage_audit.py",
-                 "--run-dir", str(run_dir), "--topic", args.topic]
 
     print("Round-1 retrieval command sequence (run in order):")
     print(f"  1. {_fmt(scope_cmd)}")

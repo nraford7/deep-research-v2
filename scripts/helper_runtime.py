@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 import os
 from pathlib import Path
 from typing import Iterator
@@ -13,6 +14,31 @@ from scripts.run_transactions import ImmutableRegistry, RunLease, guard_legacy_m
 
 class ManagedHelperRequired(RuntimeError):
     pass
+
+
+_BROKER_MANAGED: ContextVar[bool] = ContextVar("deeper_research_broker_managed", default=False)
+
+
+@contextmanager
+def broker_managed_context():
+    token = _BROKER_MANAGED.set(True)
+    try:
+        yield
+    finally:
+        _BROKER_MANAGED.reset(token)
+
+
+def is_broker_managed() -> bool:
+    """Return whether the current in-process helper call owns the run lease."""
+
+    return _BROKER_MANAGED.get()
+
+
+def require_managed_mutation(layout: RunLayout, operation: str) -> None:
+    if layout.kind is LayoutKind.V2 and not is_broker_managed():
+        raise ManagedHelperRequired(
+            f"{operation} targets managed v2 run {layout.run_root}; use run_manager invoke-helper"
+        )
 
 
 def resolve_helper_layout(
@@ -74,7 +100,10 @@ def standalone_mutation_guard(
 
 __all__ = [
     "ManagedHelperRequired",
+    "broker_managed_context",
     "enclosing_layout",
+    "is_broker_managed",
     "resolve_helper_layout",
+    "require_managed_mutation",
     "standalone_mutation_guard",
 ]

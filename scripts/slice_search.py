@@ -75,7 +75,7 @@ if _ROOT not in sys.path:
 
 import config
 from scripts.classify_sources import tier_of, authority_tag, descriptors_of
-from scripts.helper_runtime import enclosing_layout, resolve_helper_layout
+from scripts.helper_runtime import enclosing_layout, require_managed_mutation, resolve_helper_layout
 from scripts.run_layout import LayoutKind, RunLayout
 from scripts.cost import RETRIEVAL_FEES, RETRY_MULTIPLIER
 from scripts.ledger import RetrievalLedger, LedgerCapExceeded
@@ -514,6 +514,7 @@ def main(argv=None):
 
     run_dir = Path(args.run_dir)
     layout = resolve_helper_layout(run_dir)
+    require_managed_mutation(layout, "slice retrieval")
     round1_dir = layout.round1
     round1_dir.mkdir(parents=True, exist_ok=True)
 

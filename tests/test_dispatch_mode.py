@@ -14,6 +14,7 @@ import pytest
 
 import config
 import dispatch
+from scripts.run_transactions import create_skeleton_transaction
 
 
 def _run_main(monkeypatch, argv, env):
@@ -137,3 +138,20 @@ def test_project_dir_creates_project_local_v2_run(monkeypatch, capsys, tmp_path)
     out = capsys.readouterr().out
     assert "run_manager.py invoke-helper" in out
     assert str(run_dir / "Sections") in out
+
+
+def test_existing_v2_run_is_resumed_through_managed_helpers(monkeypatch, capsys, tmp_path):
+    library = tmp_path / "research"
+    library.mkdir()
+    run_dir = create_skeleton_transaction(library, "topic", question="Q").publish()
+
+    code = _run_main(
+        monkeypatch,
+        ["--topic", "Q", "--scope", "s", "--run-dir", str(run_dir)],
+        env={"EXA_API_KEY": "exa-test-key"},
+    )
+
+    assert code is None
+    out = capsys.readouterr().out
+    assert "--helper slice-search" in out
+    assert "scripts/slice_search.py" not in out

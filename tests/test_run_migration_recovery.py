@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import pytest
@@ -48,6 +49,32 @@ def test_rollback_refuses_unrecorded_or_changed_entry(tmp_path):
     (migrated / "Process" / "round1" / "unrecorded.txt").write_text("x")
 
     with pytest.raises(RollbackConflict, match="unrecorded"):
+        rollback_migration(migrated)
+
+
+def test_rollback_refuses_tampered_migration_metadata(tmp_path):
+    legacy = _legacy(tmp_path / "research")
+    migrated = apply_migration(plan_migration(legacy, legacy.parent))
+    metadata = migrated / "Process" / "migration.json"
+    payload = json.loads(metadata.read_text())
+    payload["original_source"] = str(tmp_path / "redirected" / "topic")
+    metadata.write_text(json.dumps(payload) + "\n")
+
+    with pytest.raises(RollbackConflict, match="digest"):
+        rollback_migration(migrated)
+
+
+def test_rollback_refuses_rehashed_metadata_that_disagrees_with_transaction(tmp_path):
+    legacy = _legacy(tmp_path / "research")
+    migrated = apply_migration(plan_migration(legacy, legacy.parent))
+    metadata = migrated / "Process" / "migration.json"
+    payload = json.loads(metadata.read_text())
+    payload["original_source"] = str(tmp_path / "redirected" / "topic")
+    metadata.write_text(json.dumps(payload) + "\n")
+    digest = hashlib.sha256(metadata.read_bytes()).hexdigest()
+    (migrated / "Process" / "migration.sha256").write_text(digest + "\n")
+
+    with pytest.raises(RollbackConflict, match="transaction anchor"):
         rollback_migration(migrated)
 
 

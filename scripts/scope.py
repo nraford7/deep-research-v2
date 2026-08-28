@@ -25,7 +25,7 @@ import re
 import sys
 from pathlib import Path
 
-from scripts.helper_runtime import standalone_mutation_guard
+from scripts.helper_runtime import require_managed_mutation, standalone_mutation_guard
 
 
 DOMAIN_RULES = {
@@ -154,6 +154,7 @@ def build_scope_payload(topic: str, scope_text: str = "", *, use_llm: bool = Fal
 
 
 def managed_scope(*, layout, fs, typed_args):
+    require_managed_mutation(layout, "scope")
     allowed = {"topic", "scope", "use_llm"}
     unknown = set(typed_args) - allowed
     if unknown:

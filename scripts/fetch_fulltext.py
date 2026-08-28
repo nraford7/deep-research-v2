@@ -43,7 +43,7 @@ if str(_HERE.parent) not in sys.path:
     sys.path.insert(0, str(_HERE.parent))
 
 from scripts import verify_citations as vc
-from scripts.helper_runtime import resolve_helper_layout
+from scripts.helper_runtime import require_managed_mutation, resolve_helper_layout
 from scripts.run_layout import LayoutKind
 from scripts.run_path_schema import PATH_SCHEMAS
 from scripts.slice_search import _source_filename
@@ -455,7 +455,9 @@ def main(argv=None) -> int:
     ap.add_argument("--timeout", type=int, default=20)
     args = ap.parse_args(argv)
 
-    round1 = resolve_helper_layout(args.run_dir).round1
+    layout = resolve_helper_layout(args.run_dir)
+    require_managed_mutation(layout, "full-text retrieval")
+    round1 = layout.round1
     if not round1.is_dir():
         print(f"  ⚠ no round1/ under {args.run_dir} — nothing to do",
               file=sys.stderr)

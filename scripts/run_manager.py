@@ -126,6 +126,11 @@ class PrepareResult:
 # (module, function, exact typed argument names).
 MANAGED_HELPERS: dict[str, tuple[str, str, frozenset[str]]] = {
     "scope": ("scripts.scope", "managed_scope", frozenset({"topic", "scope", "use_llm"})),
+    "slice-search": ("scripts.managed_helpers", "managed_slice", frozenset({"topic", "resume", "max_retrieval_usd", "fresh_since", "only_slice", "query", "add_slice"})),
+    "fetch-fulltext": ("scripts.managed_helpers", "managed_fetch_fulltext", frozenset({"min_chars", "max_bytes", "max_chars", "timeout"})),
+    "citation-chase": ("scripts.managed_helpers", "managed_citation_chase", frozenset({"topic", "max_seeds", "max_candidates", "forward", "openalex_call_ceiling"})),
+    "coverage-audit": ("scripts.managed_helpers", "managed_coverage_audit", frozenset({"topic", "max_audit_rounds", "audit_usd", "use_matrix", "current_year"})),
+    "deepen-questions": ("scripts.managed_helpers", "managed_deepen", frozenset({"round2_file", "single_question", "bucket", "max_retrieval_usd"})),
 }
 
 
@@ -513,13 +518,17 @@ def _broker_dispatch(request: Mapping[str, Any], context: Mapping[str, Any], lea
             raise BrokerProtocolError("helper is not registered in the manager")
         module_name, function_name, _ = MANAGED_HELPERS[helper_id]
         function = getattr(importlib.import_module(module_name), function_name)
-        return function(layout=layout, fs=managed, typed_args=dict(request["args"]))
+        from scripts.helper_runtime import broker_managed_context
+        with broker_managed_context():
+            return function(layout=layout, fs=managed, typed_args=dict(request["args"]))
     if action == "export":
         try:
             function = getattr(importlib.import_module("scripts.export"), "managed_export")
         except (ImportError, AttributeError) as exc:
             raise BrokerProtocolError("managed export is not installed") from exc
-        return function(layout=layout, fs=managed, typed_args=dict(request["options"]))
+        from scripts.helper_runtime import broker_managed_context
+        with broker_managed_context():
+            return function(layout=layout, fs=managed, typed_args=dict(request["options"]))
     if action == "finalize":
         return seal_run(layout, lease=lease)
     if action == "mark-failed":

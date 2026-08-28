@@ -64,7 +64,8 @@ never share that reader-facing source home.
 Export and finish through managed mode:
 
 ```bash
-python3 scripts/export.py --run-dir "$RUN"
+python3 scripts/export.py --run-dir "$RUN" \
+  --broker-endpoint "$BROKER" --lease-token "$TOKEN"
 python3 scripts/run_manager.py finalize \
   --broker-endpoint "$BROKER" --lease-token "$TOKEN" --json
 python3 scripts/run_manager.py lease release \
@@ -703,12 +704,16 @@ If the adversary or the gate exposes a weak spot, rerun narrowly, then re-integr
 
 ```bash
 # Re-fetch one slice with a sharper query:
-python3 scripts/slice_search.py --run-dir research/[slug] --topic "Your topic" \
-  --only-slice institutional --query "Your topic — specific sub-question"
+python3 scripts/run_manager.py invoke-helper \
+  --broker-endpoint "$BROKER" --lease-token "$TOKEN" \
+  --helper slice-search \
+  --args-json '{"topic":"Your topic","only_slice":"institutional","query":"Your topic — specific sub-question"}'
 
 # Or deepen exactly one question in a chosen bucket:
-python3 scripts/deepen_questions.py --run-dir research/[slug] \
-  --single-question "The specific open question" --bucket gap   # or root_cause | consequence
+python3 scripts/run_manager.py invoke-helper \
+  --broker-endpoint "$BROKER" --lease-token "$TOKEN" \
+  --helper deepen-questions \
+  --args-json '{"single_question":"The specific open question","bucket":"gap"}'
 ```
 
 Re-run the gate / verifier over the affected section and update the draft. Cap at 2
@@ -717,10 +722,8 @@ iterations to avoid loops.
 ## Export
 
 ```bash
-python3 scripts/export.py \
-  --sections research/[slug]/sections/ \
-  --bibliography research/[slug]/sections/bibliography.md \
-  --output-dir research/[slug]/export/
+python3 scripts/export.py --run-dir "$RUN" \
+  --broker-endpoint "$BROKER" --lease-token "$TOKEN"
 
 # Refresh the project-wide semantic index over every topic's Bible (bundled;
 # skips with a notice + exits 0 if search deps / OPENAI_API_KEY absent):
@@ -729,7 +732,7 @@ python3 scripts/search.py index
 
 HTML is additive and automatic: the canonical Markdown Bible remains unchanged. When a
 finished Bible is resolved, a same-basename self-contained `.html` companion is written
-in the export directory. Without one, the page is assembled from `sections/` and named
+at the managed run root. Without one, the page is assembled from `Sections/` and named
 `RESEARCH-BIBLE_<run-slug>.html` without synthesizing Markdown. If a compatible `jimemo`
 with the `research-bible` template is installed, the exporter uses it; otherwise every
 user receives the bundled visually equivalent page. Pass `--bible PATH` when the finished

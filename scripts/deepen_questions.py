@@ -52,7 +52,7 @@ import os
 import sys
 from pathlib import Path
 
-from scripts.helper_runtime import resolve_helper_layout
+from scripts.helper_runtime import require_managed_mutation, resolve_helper_layout
 
 try:
     import requests
@@ -402,6 +402,7 @@ def main(argv=None):
 
     run_dir = Path(args.run_dir)
     layout = resolve_helper_layout(run_dir)
+    require_managed_mutation(layout, "question deepening")
     round25_dir = layout.round2_5
 
     # Build the allocation (bucket, question) pairs.

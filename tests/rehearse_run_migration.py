@@ -15,7 +15,7 @@ if str(REPOSITORY) not in sys.path:
 from scripts import export
 from scripts.run_extension import prepare_extension
 from scripts.run_layout import LayoutKind, RunLayout
-from scripts.run_manager import broker_request
+from scripts.run_manager import broker_request, prepare_run
 from scripts.run_migration import apply_migration, plan_migration, recover_migration, rollback_migration
 from scripts.run_transactions import TreeInventory
 from scripts.search import select_documents
@@ -69,7 +69,18 @@ def main() -> None:
         for run in (migrated_direct, migrated_nested, migrated_incomplete):
             assert RunLayout.open(run).kind is LayoutKind.V2
 
-        export.main(["--run-dir", str(migrated_nested)])
+        export_session = prepare_run(
+            question="western philosophy of mind",
+            slug=migrated_nested.name,
+            library_dir=migrated_nested.parent,
+            mode="resume",
+        )
+        export.main([
+            "--run-dir", str(migrated_nested),
+            "--broker-endpoint", export_session.broker_endpoint,
+            "--lease-token", export_session.lease_token,
+        ])
+        broker_request(export_session.broker_endpoint, export_session.lease_token, "release")
         assert (migrated_nested / "RESEARCH-BIBLE_western-philosophy-of-mind.html").is_file()
         assert (migrated_nested / "Sources" / "claims.jsonl").is_file()
 

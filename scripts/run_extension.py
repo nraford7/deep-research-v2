@@ -10,10 +10,16 @@ from pathlib import Path
 import shutil
 from typing import Any
 
-from scripts.run_layout import LayoutKind, RunLayout
-from scripts.run_manager import PrepareResult, prepare_run
+from scripts.run_layout import LayoutKind, RunLayout, safe_relpath
+from scripts.run_manager import (
+    PrepareResult,
+    _collision_paths,
+    _fresh_component,
+    _managed_result,
+    prepare_run,
+)
 from scripts.run_state import RunMetadata, transition_status, validate_legacy_completion, validate_seal
-from scripts.run_transactions import ImmutableRegistry, RunLease, TreeInventory
+from scripts.run_transactions import ImmutableRegistry, RunLease, TreeInventory, create_skeleton_transaction
 
 
 class ExtensionError(RuntimeError):
@@ -79,7 +85,12 @@ def _inherit_active_corpus(parent: RunLayout, child: RunLayout, parent_run_id: s
                 continue
             value = row.get("text_path")
             if isinstance(value, str) and value:
-                origin = parent.run_root / value if parent.kind is LayoutKind.V2 else parent.round1 / value
+                try:
+                    relative = safe_relpath(value)
+                except ValueError as exc:
+                    raise ExtensionError(f"unsafe inherited text_path: {value!r}") from exc
+                base = parent.run_root if parent.kind is LayoutKind.V2 else parent.round1
+                origin = base / relative
                 if origin.is_file():
                     digest = hashlib.sha256(origin.read_bytes()).hexdigest()[:16]
                     name = f"{digest}-{origin.name}"
@@ -111,16 +122,16 @@ def prepare_extension(parent_run, question: str, *, dry_run: bool = False) -> Ex
     before = TreeInventory.capture(parent.run_root)
     parent_lease = RunLease.acquire(parent.run_root.parent, parent.run_root.name, operation="extend")
     prepared = None
+    transaction = None
+    published = False
     try:
-        prepared = prepare_run(
-            question=question,
-            slug=parent.run_root.name,
-            library_dir=parent.run_root.parent,
-            mode="fresh",
-        )
-        if prepared.run_dir is None:
-            raise ExtensionError("extension child was not created")
-        child = RunLayout.open(prepared.run_dir)
+        library = parent.run_root.parent
+        component = _fresh_component(library, parent.run_root.name)
+        transaction = create_skeleton_transaction(library, component, question=question.strip())
+        aliases = _collision_paths(library, component)
+        if aliases:
+            raise ExtensionError(f"extension child alias appeared before construction: {aliases[0]}")
+        child = RunLayout.open(transaction.skeleton)
         child_metadata = RunMetadata.load(child)
         snapshot = child.process / "Inherited" / parent.run_root.name / "snapshot"
         _copy_tree(parent.run_root, snapshot / "tree")
@@ -158,6 +169,19 @@ def prepare_extension(parent_run, question: str, *, dry_run: bool = False) -> Ex
         # Complete parents must remain byte-for-byte unchanged.
         if not should_freeze and TreeInventory.capture(parent.run_root) != before:
             raise ExtensionError("extension changed an immutable completed parent")
+        child_path = transaction.publish()
+        published = True
+        child = RunLayout.open(child_path)
+        # Inheritance is a coordinator-owned construction phase. Launch the
+        # child broker only after it ends so no out-of-process lease exists
+        # while the snapshot and provenance files are being populated.
+        prepared = _managed_result(
+            action="extended",
+            run_dir=child.run_root,
+            project=None,
+            library=library,
+            transaction_id=transaction.transaction_id,
+        )
         return ExtensionPlan(
             parent.run_root,
             child.run_root,
@@ -168,7 +192,13 @@ def prepare_extension(parent_run, question: str, *, dry_run: bool = False) -> Ex
             prepared,
         )
     except Exception:
-        # Creation recovery owns child cleanup; never remove an unverified tree here.
+        # Creation recovery owns hidden-skeleton cleanup; never remove an
+        # unverified tree here. Release only the construction lease we still own.
+        if transaction is not None and not published:
+            try:
+                transaction.lease.release(transaction.lease.owner.token)
+            except Exception:
+                pass
         raise
     finally:
         parent_lease.release(parent_lease.owner.token)

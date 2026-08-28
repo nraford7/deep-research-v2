@@ -77,7 +77,7 @@ if _ROOT not in sys.path:
 import config
 import llm
 from scripts.ledger import LedgerCapExceeded, RetrievalLedger
-from scripts.helper_runtime import resolve_helper_layout
+from scripts.helper_runtime import is_broker_managed, require_managed_mutation, resolve_helper_layout
 from scripts.run_layout import LayoutKind
 
 # slice_search returns this when a gap fetch trips the retrieval cap. We catch it
@@ -501,6 +501,12 @@ def _fetch_gap(run_dir, topic, name, query, cap_usd):
     ]
     if cap_usd is not None:
         cmd += ["--max-retrieval-usd", str(cap_usd)]
+    if is_broker_managed():
+        # Stay inside the broker-owned process so the nested mutating helper
+        # inherits the lease-scoped ContextVar instead of opening a bypassing
+        # subprocess.
+        from scripts import slice_search
+        return slice_search.main(cmd[2:])
     proc = subprocess.run(cmd)
     return proc.returncode
 
@@ -584,6 +590,7 @@ def main(argv=None):
 
     run_dir = Path(args.run_dir)
     layout = resolve_helper_layout(run_dir)
+    require_managed_mutation(layout, "coverage audit")
     round1_dir = layout.round1
     round1_dir.mkdir(parents=True, exist_ok=True)
 

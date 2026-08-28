@@ -166,6 +166,21 @@ def test_broker_publishes_only_stage_allowed_scratch_artifacts_and_records_stage
         _release(result)
 
 
+def test_broker_runs_allowlisted_mutating_helper_under_lease(tmp_path: Path) -> None:
+    result = prepare_run(question="Q", slug="topic", project_dir=tmp_path)
+    try:
+        response = broker_request(
+            result.broker_endpoint,
+            result.lease_token,
+            "invoke-helper",
+            helper_id="fetch-fulltext",
+            args={},
+        )
+        assert response == {"exit_code": 0}
+    finally:
+        _release(result)
+
+
 def test_cli_mode_required_uses_stable_exit_code_and_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     library = tmp_path / "research"
     library.mkdir()

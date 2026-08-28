@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from scripts import background, evidence_gate, fetch_fulltext, scope, slice_search
-from scripts.helper_runtime import resolve_helper_layout
+from scripts.helper_runtime import ManagedHelperRequired, broker_managed_context, resolve_helper_layout
 from scripts.ledger import RetrievalLedger
 from scripts.run_fs import RootedFS, UnsafePathError
 from scripts.run_layout import LayoutKind, RunLayout
@@ -88,11 +88,12 @@ def test_slice_spill_uses_sources_extracted_for_v2(v2_run: Path) -> None:
 def test_managed_scope_writes_only_canonical_json(v2_run: Path) -> None:
     layout = RunLayout.open(v2_run)
     fs = RootedFS(v2_run)
-    result = scope.managed_scope(
-        layout=layout,
-        fs=fs,
-        typed_args={"topic": "central bank policy", "scope": "global", "use_llm": False},
-    )
+    with broker_managed_context():
+        result = scope.managed_scope(
+            layout=layout,
+            fs=fs,
+            typed_args={"topic": "central bank policy", "scope": "global", "use_llm": False},
+        )
     assert result["path"] == "Process/scope.json"
     payload = json.loads((v2_run / "Process" / "scope.json").read_text(encoding="utf-8"))
     assert payload["topic"] == "central bank policy"
@@ -106,7 +107,7 @@ def test_managed_scope_respects_sealed_state_guard(v2_run: Path) -> None:
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     layout = RunLayout.open(v2_run)
     fs = RootedFS(v2_run, state_guard=make_state_guard(layout))
-    with pytest.raises(UnsafePathError, match="sealed or frozen"):
+    with broker_managed_context(), pytest.raises(UnsafePathError, match="sealed or frozen"):
         scope.managed_scope(layout=layout, fs=fs, typed_args={"topic": "T", "scope": "", "use_llm": False})
 
 
@@ -121,3 +122,8 @@ def test_helper_layout_never_implicitly_creates_an_unmanaged_run(tmp_path: Path)
     layout = resolve_helper_layout(tmp_path, allow_unmanaged=True)
     assert layout.kind is LayoutKind.UNMANAGED
     assert list(tmp_path.iterdir()) == []
+
+
+def test_mutating_helper_rejects_direct_v2_execution(v2_run: Path) -> None:
+    with pytest.raises(ManagedHelperRequired, match="run_manager invoke-helper"):
+        fetch_fulltext.main(["--run-dir", str(v2_run)])

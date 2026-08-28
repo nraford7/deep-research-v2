@@ -1,7 +1,9 @@
 import json
 import os
 
-from scripts.run_extension import prepare_extension
+import pytest
+
+from scripts.run_extension import ExtensionError, prepare_extension
 from scripts.run_manager import broker_request, prepare_run
 from scripts.run_state import RunMetadata
 from scripts.run_transactions import TreeInventory
@@ -77,3 +79,17 @@ def test_manager_extend_returns_new_child_with_broker_handoff(tmp_path):
     assert result.broker_endpoint and result.lease_token
     assert (result.run_dir / "Process" / "lineage.json").is_file()
     broker_request(result.broker_endpoint, result.lease_token, "release")
+
+
+def test_unsafe_inherited_source_path_never_publishes_a_child(tmp_path):
+    parent, _ = _partial_parent(tmp_path)
+    corpus = parent / "Process" / "round1" / "slice_web.jsonl"
+    row = json.loads(corpus.read_text())
+    row["text_path"] = "../../outside.txt"
+    corpus.write_text(json.dumps(row) + "\n")
+
+    with pytest.raises(ExtensionError, match="unsafe inherited text_path"):
+        prepare_extension(parent, "Unsafe extension")
+
+    visible = [path.name for path in parent.parent.iterdir() if not path.name.startswith(".")]
+    assert visible == [parent.name]

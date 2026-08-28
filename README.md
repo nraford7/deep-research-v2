@@ -153,7 +153,9 @@ In Claude Code:
 /deeper-research [your topic and scope]
 ```
 
-The skill walks the agent through every round. Or invoke the dispatcher and helper scripts directly (retrieval-first — Round 1 fetches the corpus, the gate must pass before synthesis):
+The skill walks the agent through every round using the managed broker workflow in
+`SKILL.md`. The direct helper recipe below is retained for legacy/manual runs only
+(retrieval-first — Round 1 fetches the corpus, and the gate must pass before synthesis):
 
 ```bash
 RUN=research/cbdc

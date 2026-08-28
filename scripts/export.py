@@ -36,9 +36,10 @@ from scripts.research_bible_html import (
     export_html,
     resolve_bible_path,
 )
-from scripts.helper_runtime import standalone_mutation_guard
+from scripts.helper_runtime import require_managed_mutation, standalone_mutation_guard
 from scripts.run_fs import RootedFS
-from scripts.run_layout import LayoutKind, RunLayout
+from scripts.run_layout import LayoutKind, RunLayout, safe_relpath
+from scripts.run_transactions import broker_request
 
 
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
@@ -224,6 +225,7 @@ def extract_claims(sections_dir: Path, *, run_root: Path | None = None):
 
 def managed_export(*, layout: RunLayout, fs: RootedFS, typed_args: dict):
     """Publish the canonical v2 machine exports and HTML companion."""
+    require_managed_mutation(layout, "export")
     unknown = set(typed_args) - {"bible", "no_html"}
     if unknown:
         raise ValueError(f"unknown export options: {sorted(unknown)}")
@@ -249,9 +251,15 @@ def managed_export(*, layout: RunLayout, fs: RootedFS, typed_args: dict):
     }
     if not typed_args.get("no_html", False):
         bible_value = typed_args.get("bible")
-        bible = Path(bible_value) if bible_value else None
-        if bible is not None and not bible.is_absolute():
-            bible = layout.run_root / bible
+        bible = None
+        if bible_value:
+            candidate = Path(bible_value)
+            if candidate.is_absolute():
+                try:
+                    candidate = candidate.relative_to(layout.run_root)
+                except ValueError as exc:
+                    raise ValueError("managed Bible path must remain inside the run") from exc
+            bible = layout.run_root / safe_relpath(candidate)
         if bible is None:
             discovered = layout.discover_bible()
             bible = layout.run_root / discovered.markdown if discovered.markdown else None
@@ -267,6 +275,8 @@ def managed_export(*, layout: RunLayout, fs: RootedFS, typed_args: dict):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-dir", help="Managed v2 run (uses canonical layout paths)")
+    ap.add_argument("--broker-endpoint", help="Manager broker endpoint for a v2 run")
+    ap.add_argument("--lease-token", help="Manager lease token for a v2 run")
     ap.add_argument("--sections", help="Directory of section markdown files")
     ap.add_argument("--bibliography", help="Master bibliography file")
     ap.add_argument("--output-dir")
@@ -277,11 +287,14 @@ def main(argv=None):
     if args.run_dir:
         if args.sections or args.bibliography or args.output_dir:
             ap.error("--run-dir conflicts with --sections/--bibliography/--output-dir")
+        if not (args.broker_endpoint and args.lease_token):
+            ap.error("--run-dir requires --broker-endpoint and --lease-token")
         layout = RunLayout.open(args.run_dir)
-        result = managed_export(
-            layout=layout,
-            fs=RootedFS(layout.run_root),
-            typed_args={"bible": args.bible, "no_html": args.no_html},
+        result = broker_request(
+            args.broker_endpoint,
+            args.lease_token,
+            "export",
+            options={"bible": args.bible, "no_html": args.no_html},
         )
         print(f"BibTeX: {layout.run_root / result['bibliography']} ({len(parse_bib_entries(layout.bibliography_md.read_text()))} entries)")
         print(f"Claims: {layout.run_root / result['claims']} ({result['claim_count']} rows)")
