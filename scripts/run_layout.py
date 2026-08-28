@@ -374,8 +374,11 @@ class RunLayout:
         if not root.is_dir():
             raise LayoutError("invalid", f"run root is not a directory: {root}")
         metadata = root / "Process" / "run.json"
-        legacy_markers = [name for name in _LEGACY_DIR_MARKERS if (root / name).exists()]
-        legacy_markers.extend(name for name in _LEGACY_FILE_MARKERS if (root / name).exists())
+        # Compare directory-entry spellings, not Path.exists(): on a case-insensitive
+        # filesystem ``root / 'sections'`` aliases the native v2 ``Sections`` home.
+        actual_names = {entry.name for entry in root.iterdir()}
+        legacy_markers = [name for name in _LEGACY_DIR_MARKERS if name in actual_names]
+        legacy_markers.extend(name for name in _LEGACY_FILE_MARKERS if name in actual_names)
         if metadata.exists():
             try:
                 payload = json.loads(metadata.read_text(encoding="utf-8"))
