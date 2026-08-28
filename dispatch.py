@@ -16,11 +16,15 @@ Usage:
 """
 
 import argparse
+import json
 import shlex
 import sys
 from pathlib import Path
 
 import config as cfg
+from scripts.helper_runtime import resolve_helper_layout
+from scripts.run_layout import LayoutKind
+from scripts.run_manager import ManagerError, prepare_run
 
 # Make sibling scripts/ importable when run as a CLI.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -33,7 +37,13 @@ def main():
     )
     parser.add_argument("--topic", required=True, help="Research topic")
     parser.add_argument("--scope", required=True, help="Detailed scope description")
-    parser.add_argument("--run-dir", required=True, help="Run directory (holds scope/slices/gate output)")
+    parser.add_argument("--run-dir", help="Existing managed, legacy, or deliberately prepared manual run")
+    parser.add_argument("--broker-endpoint", help="Existing v2 manager broker endpoint")
+    parser.add_argument("--lease-token", help="Existing v2 manager lease token")
+    parser.add_argument("--project-dir", help="Project in which to create research/<slug>/")
+    parser.add_argument("--slug", help="Topic-qualified run name (defaults from the question)")
+    parser.add_argument("--question", help="Research question (defaults to --topic)")
+    parser.add_argument("--collision-mode", choices=["resume", "extend", "fresh", "cancel"])
     parser.add_argument("--mode", default="slices",
                         help="Run mode — only 'slices' is supported")
     parser.add_argument("--max-retrieval-usd", type=float,
@@ -58,8 +68,59 @@ def main():
               "an Exa-compatible endpoint with out-of-band auth.", file=sys.stderr)
         raise SystemExit(20)
 
-    run_dir = Path(args.run_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    broker_endpoint = lease_token = None
+    if args.run_dir:
+        run_dir = Path(args.run_dir)
+        if not run_dir.is_dir():
+            print("ERROR: --run-dir must already exist; use --project-dir for normal creation.",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        layout = resolve_helper_layout(run_dir)
+        if layout.kind is LayoutKind.V2:
+            if bool(args.broker_endpoint) != bool(args.lease_token):
+                print("ERROR: --broker-endpoint and --lease-token must be supplied together.",
+                      file=sys.stderr)
+                raise SystemExit(2)
+            if args.broker_endpoint:
+                broker_endpoint, lease_token = args.broker_endpoint, args.lease_token
+            else:
+                try:
+                    prepared = prepare_run(
+                        question=args.question or args.topic,
+                        slug=run_dir.name,
+                        library_dir=run_dir.parent,
+                        mode="resume",
+                    )
+                except ManagerError as exc:
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    raise SystemExit(int(exc.exit_code))
+                if prepared.action == "complete-noop":
+                    print(f"Run is already complete: {run_dir}")
+                    return
+                broker_endpoint = prepared.broker_endpoint
+                lease_token = prepared.lease_token
+    else:
+        try:
+            prepared = prepare_run(
+                question=args.question or args.topic,
+                slug=args.slug,
+                project_dir=args.project_dir,
+                mode=args.collision_mode,
+            )
+        except ManagerError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            raise SystemExit(int(exc.exit_code))
+        if prepared.action == "mode-required":
+            print("ERROR: the run already exists; choose --collision-mode "
+                  + ", ".join(prepared.choices), file=sys.stderr)
+            raise SystemExit(12)
+        if prepared.run_dir is None:
+            print("Run creation cancelled.")
+            return
+        run_dir = prepared.run_dir
+        layout = resolve_helper_layout(run_dir)
+        broker_endpoint = prepared.broker_endpoint
+        lease_token = prepared.lease_token
 
     cap_arg = []
     if args.max_retrieval_usd is not None:
@@ -68,17 +129,37 @@ def main():
     def _fmt(parts):
         return " ".join(shlex.quote(p) for p in parts)
 
-    scope_cmd = ["python3", "scripts/scope.py",
-                 "--topic", args.topic, "--scope", args.scope,
-                 "--output", str(run_dir / "scope.json")]
-    slice_cmd = ["python3", "scripts/slice_search.py",
-                 "--topic", args.topic, "--run-dir", str(run_dir)] + cap_arg
+    if layout.kind is LayoutKind.V2 and broker_endpoint and lease_token:
+        def _managed(helper, payload):
+            return ["python3", "scripts/run_manager.py", "invoke-helper",
+                    "--broker-endpoint", broker_endpoint,
+                    "--lease-token", lease_token,
+                    "--helper", helper, "--args-json",
+                    json.dumps(payload, separators=(",", ":"))]
+        scope_cmd = ["python3", "scripts/run_manager.py", "invoke-helper",
+                     "--broker-endpoint", broker_endpoint,
+                     "--lease-token", lease_token,
+                     "--helper", "scope", "--args-json", json.dumps({
+                         "topic": args.topic, "scope": args.scope, "use_llm": False,
+                     }, separators=(",", ":"))]
+        slice_payload = {"topic": args.topic}
+        if args.max_retrieval_usd is not None:
+            slice_payload["max_retrieval_usd"] = args.max_retrieval_usd
+        slice_cmd = _managed("slice-search", slice_payload)
+        chase_cmd = _managed("citation-chase", {"topic": args.topic})
+        audit_cmd = _managed("coverage-audit", {"topic": args.topic})
+    else:
+        scope_cmd = ["python3", "scripts/scope.py",
+                     "--topic", args.topic, "--scope", args.scope,
+                     "--output", str(layout.scope)]
+        slice_cmd = ["python3", "scripts/slice_search.py",
+                     "--topic", args.topic, "--run-dir", str(run_dir)] + cap_arg
+        chase_cmd = ["python3", "scripts/citation_chase.py",
+                     "--run-dir", str(run_dir), "--topic", args.topic]
+        audit_cmd = ["python3", "scripts/coverage_audit.py",
+                     "--run-dir", str(run_dir), "--topic", args.topic]
     gate_cmd = ["python3", "scripts/evidence_gate.py",
                 "--run-dir", str(run_dir)]
-    chase_cmd = ["python3", "scripts/citation_chase.py",
-                 "--run-dir", str(run_dir), "--topic", args.topic]
-    audit_cmd = ["python3", "scripts/coverage_audit.py",
-                 "--run-dir", str(run_dir), "--topic", args.topic]
 
     print("Round-1 retrieval command sequence (run in order):")
     print(f"  1. {_fmt(scope_cmd)}")
@@ -96,7 +177,7 @@ def main():
           "the fallback audit could not complete or the corpus is still thin: do NOT "
           "proceed to synthesis, surface and resolve it.)")
     print("Round 4 checklist step: python3 scripts/lint_background.py "
-          f"{shlex.quote(str(run_dir / 'sections'))}")
+          f"{shlex.quote(str(layout.sections))}")
 
 
 if __name__ == "__main__":

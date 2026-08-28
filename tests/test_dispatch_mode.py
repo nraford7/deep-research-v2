@@ -14,6 +14,7 @@ import pytest
 
 import config
 import dispatch
+from scripts.run_transactions import create_skeleton_transaction
 
 
 def _run_main(monkeypatch, argv, env):
@@ -38,6 +39,7 @@ def _run_main(monkeypatch, argv, env):
 
 def test_slices_mode_with_key_prints_sequence_exit_0(monkeypatch, capsys, tmp_path):
     run_dir = tmp_path / "run1"
+    run_dir.mkdir()
     code = _run_main(
         monkeypatch,
         ["--topic", "grid battery", "--scope", "full scope",
@@ -66,9 +68,11 @@ def test_slices_mode_with_key_prints_sequence_exit_0(monkeypatch, capsys, tmp_pa
 
 def test_slices_mode_is_the_default(monkeypatch, capsys, tmp_path):
     # No --mode flag → defaults to slices → prints the sequence, exit 0.
+    run_dir = tmp_path / "d"
+    run_dir.mkdir()
     code = _run_main(
         monkeypatch,
-        ["--topic", "t", "--scope", "s", "--run-dir", str(tmp_path / "d")],
+        ["--topic", "t", "--scope", "s", "--run-dir", str(run_dir)],
         env={"EXA_API_KEY": "exa-test-key"},
     )
     assert code is None
@@ -76,6 +80,7 @@ def test_slices_mode_is_the_default(monkeypatch, capsys, tmp_path):
 
 
 def test_legacy_mode_exits_2(monkeypatch, tmp_path):
+    (tmp_path / "d").mkdir()
     code = _run_main(
         monkeypatch,
         ["--topic", "t", "--scope", "s",
@@ -86,6 +91,7 @@ def test_legacy_mode_exits_2(monkeypatch, tmp_path):
 
 
 def test_missing_exa_key_exits_20(monkeypatch, tmp_path):
+    (tmp_path / "d").mkdir()
     # EXA_API_KEY absent from the (hermetic) env → preflight fails with exit 20.
     code = _run_main(
         monkeypatch,
@@ -96,6 +102,7 @@ def test_missing_exa_key_exits_20(monkeypatch, tmp_path):
 
 
 def test_max_retrieval_cap_threads_into_slice_command(monkeypatch, capsys, tmp_path):
+    (tmp_path / "d").mkdir()
     code = _run_main(
         monkeypatch,
         ["--topic", "t", "--scope", "s", "--run-dir", str(tmp_path / "d"),
@@ -105,3 +112,46 @@ def test_max_retrieval_cap_threads_into_slice_command(monkeypatch, capsys, tmp_p
     assert code is None
     out = capsys.readouterr().out
     assert "--max-retrieval-usd" in out and "8" in out
+
+
+def test_explicit_run_dir_never_creates_unmanaged_directory(monkeypatch, tmp_path):
+    run_dir = tmp_path / "missing"
+    code = _run_main(
+        monkeypatch,
+        ["--topic", "t", "--scope", "s", "--run-dir", str(run_dir)],
+        env={"EXA_API_KEY": "exa-test-key"},
+    )
+    assert code == 2
+    assert not run_dir.exists()
+
+
+def test_project_dir_creates_project_local_v2_run(monkeypatch, capsys, tmp_path):
+    code = _run_main(
+        monkeypatch,
+        ["--topic", "Grid Battery", "--scope", "s", "--question", "Grid Battery",
+         "--project-dir", str(tmp_path)],
+        env={"EXA_API_KEY": "exa-test-key"},
+    )
+    assert code is None
+    run_dir = tmp_path / "research" / "grid-battery"
+    assert (run_dir / "Process" / "run.json").is_file()
+    out = capsys.readouterr().out
+    assert "run_manager.py invoke-helper" in out
+    assert str(run_dir / "Sections") in out
+
+
+def test_existing_v2_run_is_resumed_through_managed_helpers(monkeypatch, capsys, tmp_path):
+    library = tmp_path / "research"
+    library.mkdir()
+    run_dir = create_skeleton_transaction(library, "topic", question="Q").publish()
+
+    code = _run_main(
+        monkeypatch,
+        ["--topic", "Q", "--scope", "s", "--run-dir", str(run_dir)],
+        env={"EXA_API_KEY": "exa-test-key"},
+    )
+
+    assert code is None
+    out = capsys.readouterr().out
+    assert "--helper slice-search" in out
+    assert "scripts/slice_search.py" not in out

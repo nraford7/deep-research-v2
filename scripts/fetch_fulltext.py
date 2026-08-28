@@ -43,6 +43,9 @@ if str(_HERE.parent) not in sys.path:
     sys.path.insert(0, str(_HERE.parent))
 
 from scripts import verify_citations as vc
+from scripts.helper_runtime import require_managed_mutation, resolve_helper_layout
+from scripts.run_layout import LayoutKind
+from scripts.run_path_schema import PATH_SCHEMAS
 from scripts.slice_search import _source_filename
 
 # A row whose stored text is shorter than this is treated as "thin" and gets a
@@ -324,8 +327,9 @@ def _fetch_row_text(url: str, is_academic: bool, max_bytes: int,
 
 def process_run(run_dir: Path, min_chars: int, max_bytes: int,
                 max_chars: int, timeout: int) -> dict:
-    round1 = run_dir / "round1"
-    sources_dir = round1 / "sources"
+    layout = resolve_helper_layout(run_dir)
+    round1 = layout.round1
+    sources_dir = layout.extracted_sources
     slice_files = sorted(round1.glob("slice_*.jsonl"))
     summary = {"attempted": 0, "fetched": 0, "skipped": 0,
                "by_method": {}, "failures": {}}
@@ -367,7 +371,11 @@ def process_run(run_dir: Path, min_chars: int, max_bytes: int,
                 base = _source_filename(row)[:-4]  # strip trailing '.txt'
                 raw_name = f"{base}.{ext or 'bin'}"
                 (sources_dir / raw_name).write_bytes(raw)
-                row["raw_path"] = f"sources/{raw_name}"
+                row["raw_path"] = (
+                    f"Sources/Extracted/{raw_name}"
+                    if layout.kind is LayoutKind.V2
+                    else f"sources/{raw_name}"
+                )
                 changed = True
 
             # Keep the longer text: our direct fetch vs. the existing Exa snippet.
@@ -375,7 +383,11 @@ def process_run(run_dir: Path, min_chars: int, max_bytes: int,
                 sources_dir.mkdir(parents=True, exist_ok=True)
                 fname = _source_filename(row)
                 (sources_dir / fname).write_text(text, encoding="utf-8")
-                row["text_path"] = f"sources/{fname}"
+                row["text_path"] = (
+                    f"Sources/Extracted/{fname}"
+                    if layout.kind is LayoutKind.V2
+                    else f"sources/{fname}"
+                )
                 row["text_chars"] = len(text)
                 row["fulltext_method"] = method
                 summary["fetched"] += 1
@@ -393,6 +405,9 @@ def process_run(run_dir: Path, min_chars: int, max_bytes: int,
                     summary["failures"].get(reason, 0) + 1
                 print(f"  · skip ({reason})  {url}", file=sys.stderr)
         if changed:
+            document = jsonl_path.relative_to(layout.run_root).as_posix()
+            for row in rows:
+                PATH_SCHEMAS.validate_document(layout, document, row)
             _write_rows(jsonl_path, rows)
 
     (round1 / "fulltext_manifest.json").write_text(
@@ -440,7 +455,9 @@ def main(argv=None) -> int:
     ap.add_argument("--timeout", type=int, default=20)
     args = ap.parse_args(argv)
 
-    round1 = args.run_dir / "round1"
+    layout = resolve_helper_layout(args.run_dir)
+    require_managed_mutation(layout, "full-text retrieval")
+    round1 = layout.round1
     if not round1.is_dir():
         print(f"  ⚠ no round1/ under {args.run_dir} — nothing to do",
               file=sys.stderr)

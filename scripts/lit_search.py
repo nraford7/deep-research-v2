@@ -29,6 +29,8 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
+from scripts.helper_runtime import standalone_mutation_guard
+
 try:
     import requests
     from requests.adapters import HTTPAdapter
@@ -614,9 +616,11 @@ def main():
         for w in merged:
             out.append(render_work(w))
 
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.output).write_text("\n".join(out), encoding="utf-8")
-    Path(args.output).with_suffix(".json").write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    output_path = Path(args.output)
+    with standalone_mutation_guard(output_path, operation="literature search report"):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("\n".join(out), encoding="utf-8")
+        output_path.with_suffix(".json").write_text(json.dumps(merged, indent=2), encoding="utf-8")
     print(f"Wrote: {args.output}")
 
 

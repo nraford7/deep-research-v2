@@ -17,6 +17,83 @@ a "Research Bible."
 
 There is ONE pipeline. No model fleet, no `mode` flag other than `slices`.
 
+## Managed project-local runs (default)
+
+Capture the directory where the skill was launched and prepare the run before any
+artifact is written. Normal results always live at
+`<project>/research/<run-slug>`. If the launch directory itself is named
+`research`, it is already the library and no second `research/` is added.
+
+```bash
+python3 scripts/run_manager.py prepare \
+  --project-dir "$PROJECT" --question "$QUESTION" --slug "$SLUG" --json
+```
+
+Retain the returned run path, lease token, broker endpoint, and scratch directory
+through every stage. The managed run is read-only to workers: synthesis,
+integration, section, adversary-fix, and Bible drafts are created in scratch and
+published with `scripts/run_manager.py publish-artifact`; then record the stage.
+Renew the lease before long reasoning intervals. When a slug already exists,
+offer exactly these choices and do nothing until one is selected: **Resume**,
+**Extend**, **Start fresh**, or **Cancel**. Resume reuses validated stages; Extend
+creates a new child with the full inherited corpus and provenance while the prior
+Bible is orientation-only; Start fresh creates a timestamped sibling.
+
+The v2 run tree is:
+
+Extracted source bytes always live under `Sources/Extracted/`; process artifacts
+never share that reader-facing source home.
+
+```text
+<project>/research/<run-slug>/
+├── RESEARCH-BIBLE_<run-slug>.md
+├── RESEARCH-BIBLE_<run-slug>.html
+├── Sections/
+├── Sources/
+│   ├── bibliography.md
+│   ├── bibliography.bib
+│   ├── claims.jsonl
+│   └── Extracted/
+└── Process/
+    ├── scope.json
+    ├── retrieval_ledger.json
+    ├── round1/ … round5/
+    └── stages/
+```
+
+Export and finish through managed mode:
+
+```bash
+python3 scripts/export.py --run-dir "$RUN" \
+  --broker-endpoint "$BROKER" --lease-token "$TOKEN"
+python3 scripts/run_manager.py finalize \
+  --broker-endpoint "$BROKER" --lease-token "$TOKEN" --json
+python3 scripts/run_manager.py lease release \
+  --broker-endpoint "$BROKER" --lease-token "$TOKEN" --json
+python3 scripts/search.py index --root "$PROJECT/research"
+```
+
+The Markdown Bible is always retained. If compatible `jimemo` is installed it is
+used; otherwise the bundled visually equivalent jimemo-style renderer produces the
+same automatic HTML companion for every user.
+
+### Legacy migration and manual compatibility
+
+Migration is explicit but executes immediately by default. Point it at a legacy
+run, a `research` library, or a project; use `--dry-run` for a zero-write preview.
+
+```bash
+python3 scripts/run_manager.py migrate "$PROJECT" --json
+python3 scripts/run_manager.py migrate "$PROJECT" --dry-run --json
+python3 scripts/run_manager.py migration-recover "$PROJECT/research" --mode continue
+python3 scripts/run_manager.py migration-recover "$PROJECT/research" --mode abort
+python3 scripts/run_manager.py rollback-migration "$RUN"
+```
+
+The older physical helper commands below remain a clearly scoped legacy/manual
+interface. `--output-root` continues to mean a direct library, not a project; new
+normal orchestration should use `--project-dir` and the manager/broker workflow.
+
 ## Runtime adapter (required at invocation)
 
 Read [references/runtime-adapters.md](references/runtime-adapters.md) before
@@ -627,12 +704,16 @@ If the adversary or the gate exposes a weak spot, rerun narrowly, then re-integr
 
 ```bash
 # Re-fetch one slice with a sharper query:
-python3 scripts/slice_search.py --run-dir research/[slug] --topic "Your topic" \
-  --only-slice institutional --query "Your topic — specific sub-question"
+python3 scripts/run_manager.py invoke-helper \
+  --broker-endpoint "$BROKER" --lease-token "$TOKEN" \
+  --helper slice-search \
+  --args-json '{"topic":"Your topic","only_slice":"institutional","query":"Your topic — specific sub-question"}'
 
 # Or deepen exactly one question in a chosen bucket:
-python3 scripts/deepen_questions.py --run-dir research/[slug] \
-  --single-question "The specific open question" --bucket gap   # or root_cause | consequence
+python3 scripts/run_manager.py invoke-helper \
+  --broker-endpoint "$BROKER" --lease-token "$TOKEN" \
+  --helper deepen-questions \
+  --args-json '{"single_question":"The specific open question","bucket":"gap"}'
 ```
 
 Re-run the gate / verifier over the affected section and update the draft. Cap at 2
@@ -641,10 +722,8 @@ iterations to avoid loops.
 ## Export
 
 ```bash
-python3 scripts/export.py \
-  --sections research/[slug]/sections/ \
-  --bibliography research/[slug]/sections/bibliography.md \
-  --output-dir research/[slug]/export/
+python3 scripts/export.py --run-dir "$RUN" \
+  --broker-endpoint "$BROKER" --lease-token "$TOKEN"
 
 # Refresh the project-wide semantic index over every topic's Bible (bundled;
 # skips with a notice + exits 0 if search deps / OPENAI_API_KEY absent):
@@ -653,7 +732,7 @@ python3 scripts/search.py index
 
 HTML is additive and automatic: the canonical Markdown Bible remains unchanged. When a
 finished Bible is resolved, a same-basename self-contained `.html` companion is written
-in the export directory. Without one, the page is assembled from `sections/` and named
+at the managed run root. Without one, the page is assembled from `Sections/` and named
 `RESEARCH-BIBLE_<run-slug>.html` without synthesizing Markdown. If a compatible `jimemo`
 with the `research-bible` template is installed, the exporter uses it; otherwise every
 user receives the bundled visually equivalent page. Pass `--bible PATH` when the finished

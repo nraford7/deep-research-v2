@@ -13,14 +13,71 @@ Usage:
     python3 scripts/search.py "<query>" [--topic SLUG] [--top N] [--json]
 """
 import argparse
+import hashlib
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+
+from scripts.run_layout import LayoutError, LayoutKind, RunLayout
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BIBLE_GLOBS = ["*/README.md", "*/sections/*.md"]
 DB_NAME = ".semantic-index.db"
 SEARCH_REQ = "requirements-search.txt"
+
+
+@dataclass(frozen=True)
+class DocumentSpec:
+    logical_id: str
+    content_path: Path
+    display_path: str
+
+
+def select_documents(library: Path) -> dict[str, list[DocumentSpec]]:
+    """Select exactly one representation of every readable research run."""
+    library = Path(library).resolve()
+    selected: dict[str, list[DocumentSpec]] = {}
+    if not library.is_dir():
+        return selected
+    for run_root in sorted((p for p in library.iterdir() if p.is_dir() and not p.name.startswith(".")), key=lambda p: p.name.casefold()):
+        try:
+            layout = RunLayout.open(run_root)
+        except LayoutError:
+            continue
+        metadata = layout.metadata_data or {}
+        run_id = str(metadata.get("run_id") or metadata.get("slug") or run_root.name)
+        files: list[Path] = []
+        bible = None
+        try:
+            discovery = layout.discover_bible()
+            bible = layout.run_root / discovery.markdown if discovery.markdown else None
+        except LayoutError:
+            bible = None
+        complete = metadata.get("status") == "complete" or metadata.get("sealed") is True
+        if layout.kind is LayoutKind.LEGACY:
+            try:
+                from scripts.run_state import validate_legacy_completion
+                complete = validate_legacy_completion(layout).ok
+            except Exception:
+                complete = False
+        if complete and bible and bible.is_file():
+            files = [bible]
+        elif layout.sections.is_dir():
+            files = sorted(layout.sections.glob("*.md"), key=lambda path: path.name.casefold())
+            files = [path for path in files if path.resolve() != layout.bibliography_md.resolve(strict=False)]
+        specs: list[DocumentSpec] = []
+        for content_path in files:
+            logical_document = content_path.relative_to(layout.run_root).as_posix()
+            logical_id = hashlib.sha256(f"{run_id}\0{logical_document}".encode()).hexdigest()
+            specs.append(DocumentSpec(
+                logical_id,
+                content_path,
+                content_path.relative_to(library).as_posix(),
+            ))
+        if specs:
+            selected[run_id] = specs
+    return selected
 
 
 def _notice(msg: str) -> None:
@@ -95,7 +152,18 @@ def _do_index(root: Path) -> int:
         return 0
     db = root / DB_NAME
     try:
-        engine.cmd_index(root, db, rebuild=False, in_patterns=BIBLE_GLOBS)
+        documents = [document for specs in select_documents(root).values() for document in specs]
+        if documents and hasattr(engine, "cmd_index_documents"):
+            engine.cmd_index_documents(
+                root,
+                db,
+                [dict(logical_id=d.logical_id, content_path=str(d.content_path), display_path=d.display_path) for d in documents],
+                rebuild=False,
+            )
+        elif documents:
+            engine.cmd_index(root, db, rebuild=False, in_patterns=[d.display_path for d in documents])
+        else:
+            engine.cmd_index(root, db, rebuild=False, in_patterns=BIBLE_GLOBS)
     except (Exception, SystemExit) as e:  # engine may sys.exit internally
         _notice(f"indexing failed ({e!r}); run completed without it.")
         return 0

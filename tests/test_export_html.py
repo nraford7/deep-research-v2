@@ -1,10 +1,13 @@
 from pathlib import Path
+import json
 import subprocess
 import sys
 
 import pytest
 
 from scripts import export
+from scripts.run_manager import prepare_run
+from scripts.run_transactions import broker_request
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -126,3 +129,29 @@ def test_documented_direct_script_invocation_resolves_html_module(tmp_path):
 
     assert completed.returncode == 0, completed.stderr
     assert "--no-html" in completed.stdout
+
+
+def test_v2_run_export_uses_reader_and_sources_homes(tmp_path, monkeypatch):
+    prepared = prepare_run(question="Topic", slug="topic", project_dir=tmp_path)
+    run = prepared.run_dir
+    (run / "Sections" / "01-findings.md").write_text(
+        "# Findings\n\nSupported [Smith, 2024].\n", encoding="utf-8")
+    (run / "Sources" / "bibliography.md").write_text(
+        "# Bibliography\n\n- Smith, A. (2024). A sufficiently long source title. https://example.com/source\n",
+        encoding="utf-8",
+    )
+    bible = run / "RESEARCH-BIBLE_topic.md"
+    bible.write_text("# Topic Research Bible\n", encoding="utf-8")
+    monkeypatch.setattr("scripts.research_bible_html.shutil.which", lambda _: None)
+
+    assert export.main([
+        "--run-dir", str(run),
+        "--broker-endpoint", prepared.broker_endpoint,
+        "--lease-token", prepared.lease_token,
+    ]) == 0
+    broker_request(prepared.broker_endpoint, prepared.lease_token, "release")
+
+    assert (run / "RESEARCH-BIBLE_topic.html").is_file()
+    assert (run / "Sources" / "bibliography.bib").is_file()
+    claim = json.loads((run / "Sources" / "claims.jsonl").read_text().splitlines()[0])
+    assert claim["file"] == "Sections/01-findings.md"

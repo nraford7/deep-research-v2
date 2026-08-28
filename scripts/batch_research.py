@@ -12,6 +12,9 @@ import shlex
 import subprocess
 import time
 
+from scripts.run_manager import ManagerError, prepare_run
+from scripts.run_state import validate_completion
+
 
 _SATURATION_RE = re.compile(
     r"\b429\b|rate[ _-]?limit|too many requests|too many (?:active|concurrent)|"
@@ -33,6 +36,11 @@ class BatchJob:
     slug: str
     run_dir: Path
     log_path: Path
+    mode: str | None = None
+    broker_endpoint: str | None = None
+    lease_token: str | None = None
+    scratch_dir: Path | None = None
+    action: str = "planned"
 
 
 @dataclass(frozen=True)
@@ -66,16 +74,29 @@ def _question_slug(question):
     return f"{readable}-{digest}"
 
 
-def prepare_jobs(questions, output_root):
-    """Create isolated pending jobs, preserving stable names across resumed batches.
+def prepare_jobs(
+    questions,
+    output_root=None,
+    *,
+    project_dir=None,
+    library_dir=None,
+    mode=None,
+    dry_run=False,
+):
+    """Plan all jobs before creating batch artifacts or launching workers.
 
     A line may be plain question text (stable hashed slug) or
     ``explicit-slug<TAB>question`` for resuming an existing named run directory.
     """
 
-    output_root = Path(output_root).resolve()
-    logs_dir = output_root / "_batch" / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
+    if output_root is not None and library_dir is not None:
+        raise ValueError("output_root and library_dir are aliases; pass only one")
+    direct_library = library_dir if library_dir is not None else output_root
+    captured_project = Path(project_dir or Path.cwd()).resolve() if direct_library is None else None
+    library = Path(direct_library).resolve() if direct_library is not None else (
+        captured_project if captured_project.name == "research" else captured_project / "research"
+    )
+    logs_dir = library / "_batch" / "logs"
     seen_questions = set()
     seen_slugs = {}
     unique_jobs = []
@@ -83,14 +104,26 @@ def prepare_jobs(questions, output_root):
         line = raw.strip()
         if not line:
             continue
-        if "\t" in line:
-            explicit_slug, question = (part.strip() for part in line.split("\t", 1))
+        row_mode = mode
+        fields = [part.strip() for part in line.split("\t")]
+        if len(fields) == 3:
+            explicit_slug, row_mode, question = fields
+            if row_mode not in {"resume", "extend", "fresh", "cancel"}:
+                raise ValueError(f"invalid collision mode: {row_mode!r}")
+        elif len(fields) == 2:
+            explicit_slug, question = fields
             if not _EXPLICIT_SLUG_RE.fullmatch(explicit_slug):
                 raise ValueError(f"invalid explicit slug: {explicit_slug!r}")
             slug = explicit_slug
-        else:
+        elif len(fields) == 1:
             question = line
             slug = _question_slug(question)
+        else:
+            raise ValueError("batch rows must be question, slug<TAB>question, or slug<TAB>mode<TAB>question")
+        if len(fields) == 3:
+            if not _EXPLICIT_SLUG_RE.fullmatch(explicit_slug):
+                raise ValueError(f"invalid explicit slug: {explicit_slug!r}")
+            slug = explicit_slug
         if not question or question in seen_questions:
             continue
         prior_question = seen_slugs.get(slug)
@@ -99,14 +132,37 @@ def prepare_jobs(questions, output_root):
                 f"explicit slug collision: {slug!r} names multiple questions")
         seen_questions.add(question)
         seen_slugs[slug] = question
-        unique_jobs.append((slug, question))
+        unique_jobs.append((slug, row_mode, question))
     jobs = []
-    for slug, question in unique_jobs:
-        run_dir = output_root / slug
-        run_dir.mkdir(parents=True, exist_ok=True)
-        if (run_dir / "RESEARCH-BIBLE.md").exists():
+    for slug, row_mode, question in unique_jobs:
+        try:
+            prepared = prepare_run(
+                question=question,
+                slug=slug,
+                project_dir=captured_project,
+                library_dir=direct_library,
+                mode=row_mode,
+                dry_run=dry_run,
+            )
+        except ManagerError as exc:
+            raise ValueError(str(exc)) from exc
+        if prepared.action == "mode-required":
+            raise ValueError(
+                f"run {slug!r} already exists; choose one of: {', '.join(prepared.choices)}"
+            )
+        if prepared.action in {"cancelled", "complete-noop"} or prepared.run_dir is None:
             continue
-        jobs.append(BatchJob(question, slug, run_dir, logs_dir / f"{slug}.log"))
+        jobs.append(BatchJob(
+            question,
+            slug,
+            prepared.run_dir,
+            logs_dir / f"{slug}.log",
+            row_mode,
+            prepared.broker_endpoint,
+            prepared.lease_token,
+            prepared.scratch_dir,
+            prepared.action,
+        ))
     return jobs
 
 
@@ -116,7 +172,9 @@ def _pipeline_prompt(adapter, job, skill_root):
         f"Use the deeper-research skill rooted at {skill_root} to run the FULL pipeline for "
         f"this question. Invoke every helper and dispatcher by its absolute path under "
         f"{skill_root}; keep all outputs under the writable run directory {job.run_dir} and "
-        f"never write under {skill_root}. Use {native} for coverage, integration, and fixes. "
+        f"never write under {skill_root}. The managed run {job.run_dir} is read-only; write "
+        f"working files only in {job.scratch_dir}, then publish every artifact through the "
+        f"run manager broker at {job.broker_endpoint}. Use {native} for coverage, integration, and fixes. "
         "For Round 2, honor an explicit [defaults].synthesis executor; otherwise use a native "
         "strongest-available synthesis subagent. Use the strongest available role for "
         "integration and balanced/cheaper roles for bounded work. Headless: skip Stage-0 "
@@ -130,12 +188,12 @@ def build_invocation(adapter, job, skill_root, claude_runner=None):
     if adapter == "codex":
         return Invocation(
             [
-                "codex", "exec", "-C", str(job.run_dir), "--ephemeral",
+                "codex", "exec", "-C", str(job.scratch_dir or job.run_dir), "--ephemeral",
                 "--sandbox", "workspace-write",
                 "-c", "sandbox_workspace_write.network_access=true",
                 "--skip-git-repo-check", "-",
             ],
-            job.run_dir,
+            job.scratch_dir or job.run_dir,
             prompt,
         )
     if adapter == "claude":
@@ -153,7 +211,7 @@ def build_invocation(adapter, job, skill_root, claude_runner=None):
         ]
         return Invocation(
             [*claude_runner, "claude", "-p", prompt, "--allowedTools", *allowed_tools],
-            job.run_dir,
+            job.scratch_dir or job.run_dir,
             None,
         )
     raise ValueError(f"unsupported adapter: {adapter}")
@@ -226,6 +284,7 @@ def run_batch(
     invocation_builder=build_invocation,
     source_env=None,
     emit=print,
+    completion_validator=validate_completion,
 ):
     """Run pending jobs without killing active work when the adaptive target falls."""
 
@@ -245,7 +304,11 @@ def run_batch(
             active.log_handle.close()
             running.remove(active)
             log_text = active.job.log_path.read_text(encoding="utf-8", errors="replace")
-            completed = returncode == 0 and (active.job.run_dir / "RESEARCH-BIBLE.md").exists()
+            try:
+                valid = completion_validator(active.job.run_dir).ok
+            except Exception:
+                valid = False
+            completed = returncode == 0 and valid
             if completed:
                 succeeded += 1
                 emit(f"[batch] completed {active.job.slug}")
@@ -260,6 +323,7 @@ def run_batch(
         while pending and limit.can_launch(now) and len(running) < limit.target:
             job = pending.popleft()
             invocation = invocation_builder(adapter, job, skill_root, claude_runner)
+            job.log_path.parent.mkdir(parents=True, exist_ok=True)
             log_handle = job.log_path.open("w", encoding="utf-8")
             try:
                 process = subprocess.Popen(
@@ -322,12 +386,16 @@ def _parser():
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path.cwd(),
+        default=None,
         help=(
-            "directory that receives run folders and _batch logs "
-            "(default: project launch directory)"
+            "legacy alias for a direct research library"
         ),
     )
+    parser.add_argument("--project-dir", type=Path, default=Path.cwd(),
+                        help="project receiving research/<slug> (default: captured launch directory)")
+    parser.add_argument("--library-dir", type=Path, help="direct research library")
+    parser.add_argument("--mode", choices=("resume", "extend", "fresh", "cancel"))
+    parser.add_argument("--new-question", help="override the question for a single extension row")
     parser.add_argument("--skill-root", type=Path)
     parser.add_argument("--initial-concurrency", type=int, default=2)
     parser.add_argument("--max-concurrency", type=int, default=8)
@@ -367,7 +435,22 @@ def main(argv=None):
 
     questions = args.questions_file.read_text(encoding="utf-8").splitlines()
     try:
-        jobs = prepare_jobs(questions, args.output_root)
+        if args.output_root and args.library_dir:
+            parser.error("--output-root and --library-dir are aliases; pass only one")
+        if args.new_question:
+            if len([line for line in questions if line.strip()]) != 1:
+                parser.error("--new-question requires exactly one input row")
+            first = next(line for line in questions if line.strip())
+            slug = first.split("\t", 1)[0] if "\t" in first else _question_slug(first)
+            questions = [f"{slug}\t{args.mode or 'extend'}\t{args.new_question}"]
+        jobs = prepare_jobs(
+            questions,
+            output_root=args.output_root,
+            project_dir=args.project_dir,
+            library_dir=args.library_dir,
+            mode=args.mode,
+            dry_run=args.dry_run,
+        )
     except ValueError as exc:
         parser.error(str(exc))
     print(

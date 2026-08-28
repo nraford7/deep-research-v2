@@ -73,6 +73,7 @@ if _ROOT not in sys.path:
 
 import config  # noqa: F401 — imported to mirror the sibling scripts' contract
 from scripts import lit_search, slice_search
+from scripts.helper_runtime import is_broker_managed, require_managed_mutation, resolve_helper_layout
 
 # Retained for callers that imported the old constants. The default pipeline now
 # cascades to Semantic Scholar and then explicit degraded mode instead of emitting
@@ -320,10 +321,14 @@ def _merge_citation_rows(round1_dir, rows):
 
 
 def _run_children(run_dir):
-    ft_rc = subprocess.run(
-        [sys.executable, str(Path(_ROOT) / "scripts" / "fetch_fulltext.py"),
-         "--run-dir", str(run_dir)]
-    ).returncode
+    if is_broker_managed():
+        from scripts import fetch_fulltext
+        ft_rc = fetch_fulltext.main(["--run-dir", str(run_dir)])
+    else:
+        ft_rc = subprocess.run(
+            [sys.executable, str(Path(_ROOT) / "scripts" / "fetch_fulltext.py"),
+             "--run-dir", str(run_dir)]
+        ).returncode
     if ft_rc != 0:
         print(f"  citation-chase: fetch_fulltext returned {ft_rc} (non-fatal).",
               file=sys.stderr)
@@ -507,7 +512,9 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir)
-    round1_dir = run_dir / "round1"
+    layout = resolve_helper_layout(run_dir)
+    require_managed_mutation(layout, "citation chase")
+    round1_dir = layout.round1
     round1_dir.mkdir(parents=True, exist_ok=True)
 
     # Bounded budget of OpenAlex HTTP requests. Every re-hydration / cites call is

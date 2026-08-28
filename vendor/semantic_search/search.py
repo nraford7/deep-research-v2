@@ -49,7 +49,7 @@ MAX_CHARS_PER_REQUEST = 800_000
 MAX_ITEMS_PER_REQUEST = 2048
 MAX_RETRIES = 5
 BACKOFF_BASE_S = 1.0
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 RRF_K = 60
 EMBEDDING_DIM_KEY = "embedding_dim"
 
@@ -548,6 +548,8 @@ def _init_schema(conn) -> None:
             """
             CREATE TABLE IF NOT EXISTS files (
                 path TEXT PRIMARY KEY,
+                logical_id TEXT UNIQUE,
+                display_path TEXT,
                 mtime REAL NOT NULL,
                 sha1 TEXT NOT NULL,
                 chunk_count INTEGER NOT NULL,
@@ -658,6 +660,32 @@ def _migrate_v2_to_v3(conn) -> None:
             "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)",
             (EMBEDDING_DIM_KEY, "1536"),  # v2's literal DIM — intentional
         )
+        conn.execute("PRAGMA user_version = 3")
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+
+
+def _migrate_v3_to_v4(conn) -> None:
+    """Add stable logical identities while retaining physical-path callers."""
+    try:
+        conn.execute("BEGIN")
+        for statement in (
+            "ALTER TABLE files ADD COLUMN logical_id TEXT",
+            "ALTER TABLE files ADD COLUMN display_path TEXT",
+        ):
+            try:
+                conn.execute(statement)
+            except Exception as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+        conn.execute("UPDATE files SET logical_id = path WHERE logical_id IS NULL")
+        conn.execute("UPDATE files SET display_path = path WHERE display_path IS NULL")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS files_logical_id_uq ON files(logical_id)")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.execute("COMMIT")
     except Exception:
@@ -748,9 +776,11 @@ def open_db(db_path: Path, *, force_rebuild: bool = False, allow_stale_dim: bool
     has_fts = _has_table(conn, "chunks_fts")
     has_files = _has_table(conn, "files")
     has_model = has_files and _has_column(conn, "files", "model")
+    has_logical = has_files and _has_column(conn, "files", "logical_id")
+    has_display = has_files and _has_column(conn, "files", "display_path")
 
     if version == SCHEMA_VERSION:
-        if has_chunks and has_fts and has_files and has_model:
+        if has_chunks and has_fts and has_files and has_model and has_logical and has_display:
             if not allow_stale_dim:
                 _check_dim(conn, db_path)
             return conn
@@ -760,9 +790,22 @@ def open_db(db_path: Path, *, force_rebuild: bool = False, allow_stale_dim: bool
         )
         sys.exit(3)
 
+    if version == 3:
+        if has_chunks and has_fts and has_files and has_model and not has_logical and not has_display:
+            _migrate_v3_to_v4(conn)
+            if not allow_stale_dim:
+                _check_dim(conn, db_path)
+            return conn
+        print(
+            f"ERROR: corrupted v3 schema at {db_path}; run with --rebuild.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
     if version == 2:
         if has_chunks and has_fts and has_files and not has_model:
             _migrate_v2_to_v3(conn)
+            _migrate_v3_to_v4(conn)
             if not allow_stale_dim:
                 _check_dim(conn, db_path)
             return conn
@@ -978,6 +1021,62 @@ def cmd_index(root: Path, db_path: Path, *, rebuild: bool,
     )
 
 
+def cmd_index_documents(root: Path, db_path: Path, documents, *, rebuild: bool) -> None:
+    """Index an authoritative document set and reconcile by stable logical ID.
+
+    Existing physical-path callers continue to use ``cmd_index`` unchanged.
+    Document callers provide dictionaries containing logical_id, content_path,
+    and display_path; display paths must be safe paths below ``root``.
+    """
+    root = Path(root).resolve()
+    normalized = []
+    logical_ids = set()
+    for raw in documents:
+        logical_id = str(raw["logical_id"])
+        content = Path(raw["content_path"]).resolve()
+        try:
+            physical = content.relative_to(root).as_posix()
+        except ValueError as exc:
+            raise ValueError("indexed content must be below the index root") from exc
+        display = str(raw["display_path"]).replace("\\", "/")
+        if display.startswith("/") or any(part in {"", ".", ".."} for part in display.split("/")):
+            raise ValueError("display_path must be a safe root-relative POSIX path")
+        if not logical_id or logical_id in logical_ids:
+            raise ValueError("logical IDs must be nonempty and unique")
+        logical_ids.add(logical_id)
+        normalized.append((logical_id, physical, display))
+
+    cmd_index(root, db_path, rebuild=rebuild, in_patterns=[item[1] for item in normalized])
+    conn = open_db(db_path)
+    conn.execute("BEGIN")
+    try:
+        for logical_id, physical, display in normalized:
+            prior = next(conn.execute(
+                "SELECT path FROM files WHERE logical_id = ?", (logical_id,)
+            ), None)
+            if prior and prior[0] != physical:
+                conn.execute("DELETE FROM chunks WHERE file_path = ?", (prior[0],))
+                conn.execute("DELETE FROM files WHERE path = ?", (prior[0],))
+            conn.execute(
+                "UPDATE files SET logical_id = ?, display_path = ? WHERE path = ?",
+                (logical_id, display, physical),
+            )
+        placeholders = ",".join("?" for _ in logical_ids)
+        if placeholders:
+            stale = [row[0] for row in conn.execute(
+                f"SELECT path FROM files WHERE logical_id NOT IN ({placeholders})", tuple(sorted(logical_ids))
+            )]
+        else:
+            stale = [row[0] for row in conn.execute("SELECT path FROM files")]
+        for physical in stale:
+            conn.execute("DELETE FROM chunks WHERE file_path = ?", (physical,))
+            conn.execute("DELETE FROM files WHERE path = ?", (physical,))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
 def excerpt(text: str, n_sentences: int = 3, hard_cap: int = 500) -> str:
     parts = SENT_SPLIT_RE.split(text.strip())
     out = " ".join(parts[:n_sentences]).strip()
@@ -995,6 +1094,10 @@ def cmd_query(q: str, root: Path, db_path: Path, *, top_k: int,
         sys.exit(2)
 
     conn = open_db(db_path)
+    display_paths = {
+        path: (display or path)
+        for path, display in conn.execute("SELECT path, display_path FROM files")
+    }
 
     # Same-dim stale-model warning (after open_db dim check, before embed).
     stale_row = next(conn.execute(
@@ -1013,7 +1116,7 @@ def cmd_query(q: str, root: Path, db_path: Path, *, top_k: int,
         match = _compile_in_matcher(in_patterns)
         allowed_ids: list[int] = []
         for cid, fpath in conn.execute("SELECT id, file_path FROM chunks"):
-            if match(fpath):
+            if match(display_paths.get(fpath, fpath)):
                 allowed_ids.append(cid)
         if not allowed_ids:
             if not as_json:
@@ -1092,6 +1195,7 @@ def cmd_query(q: str, root: Path, db_path: Path, *, top_k: int,
     if as_json:
         for cid, score in scored:
             _, path, heading, line, text = id_to_row[cid]
+            path = display_paths.get(path, path)
             obj = {
                 "path": path,
                 "line": int(line),
@@ -1106,6 +1210,7 @@ def cmd_query(q: str, root: Path, db_path: Path, *, top_k: int,
 
     for i, (cid, score) in enumerate(scored, 1):
         _, path, heading, line, text = id_to_row[cid]
+        path = display_paths.get(path, path)
         loc = f"{path}:{line}" if line else path
         head_str = f"  §{heading}" if heading else ""
         vr = vec_rank.get(cid)

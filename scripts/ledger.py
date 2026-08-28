@@ -29,6 +29,9 @@ import math
 from datetime import datetime, timezone
 from pathlib import Path
 
+from scripts.helper_runtime import resolve_helper_layout
+from scripts.run_layout import RunLayout
+
 
 def _finite_nonneg(value, label):
     """Coerce to a finite, non-negative float or raise ValueError. A retrieval
@@ -64,8 +67,10 @@ class RetrievalLedger:
     stored cap — a resumed run honours the caller's current ``--max-retrieval-usd``).
     """
 
-    def __init__(self, run_dir: Path, cap_usd: float):
-        self._path = Path(run_dir) / "retrieval_ledger.json"
+    def __init__(self, run_dir: Path | RunLayout, cap_usd: float, *, fs=None, ledger_path: Path | None = None):
+        self._layout = run_dir if isinstance(run_dir, RunLayout) else resolve_helper_layout(run_dir)
+        self._path = Path(ledger_path) if ledger_path is not None else self._layout.ledger
+        self._fs = fs
         self.cap_usd = float(cap_usd)
         self.entries: list[dict] = []
         if self._path.exists():
@@ -111,6 +116,10 @@ class RetrievalLedger:
         # NaN literal would reload and silently defeat the cap).
         payload = json.dumps({"cap_usd": self.cap_usd, "entries": self.entries},
                              indent=2, allow_nan=False)
+        if self._fs is not None:
+            relative = self._path.relative_to(self._layout.run_root).as_posix()
+            self._fs.atomic_write_text(relative, payload, create_parents=True)
+            return
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
         tmp.write_text(payload)
         tmp.replace(self._path)

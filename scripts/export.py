@@ -21,6 +21,7 @@ import argparse
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 # Support both documented direct execution (`python3 scripts/export.py`) and
@@ -35,6 +36,10 @@ from scripts.research_bible_html import (
     export_html,
     resolve_bible_path,
 )
+from scripts.helper_runtime import require_managed_mutation, standalone_mutation_guard
+from scripts.run_fs import RootedFS
+from scripts.run_layout import LayoutKind, RunLayout, safe_relpath
+from scripts.run_transactions import broker_request
 
 
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
@@ -202,7 +207,7 @@ def _cite_dict(m, sentence: str):
     return {"author": (author or "").strip(), "year": year, "kind": "academic"}
 
 
-def extract_claims(sections_dir: Path):
+def extract_claims(sections_dir: Path, *, run_root: Path | None = None):
     for f in sorted(sections_dir.rglob("*.md")):
         text = f.read_text(encoding="utf-8", errors="replace")
         sentences = SENTENCE_SPLIT_RE.split(text)
@@ -212,53 +217,130 @@ def extract_claims(sections_dir: Path):
             if not cites:
                 continue
             yield {
-                "file": str(f),
+                "file": (f.relative_to(run_root).as_posix() if run_root else str(f)),
                 "sentence": sent.strip()[:600],
                 "citations": cites,
             }
 
 
+def managed_export(*, layout: RunLayout, fs: RootedFS, typed_args: dict):
+    """Publish the canonical v2 machine exports and HTML companion."""
+    require_managed_mutation(layout, "export")
+    unknown = set(typed_args) - {"bible", "no_html"}
+    if unknown:
+        raise ValueError(f"unknown export options: {sorted(unknown)}")
+    if layout.kind is not LayoutKind.V2:
+        raise ValueError("managed export requires a v2 run")
+    bibliography = layout.bibliography_md
+    if not bibliography.is_file():
+        raise FileNotFoundError(f"missing master bibliography: {bibliography}")
+    entries = parse_bib_entries(bibliography.read_text(encoding="utf-8", errors="replace"))
+    counter: dict = {}
+    bibtex = "\n\n".join(to_bibtex_entry(entry, counter) for entry in entries)
+    fs.atomic_write_text("Sources/bibliography.bib", bibtex, create_parents=True)
+    claim_lines = [json.dumps(row) for row in extract_claims(layout.sections, run_root=layout.run_root)]
+    fs.atomic_write_text(
+        "Sources/claims.jsonl",
+        "\n".join(claim_lines) + ("\n" if claim_lines else ""),
+        create_parents=True,
+    )
+    result = {
+        "bibliography": "Sources/bibliography.bib",
+        "claims": "Sources/claims.jsonl",
+        "claim_count": len(claim_lines),
+    }
+    if not typed_args.get("no_html", False):
+        bible_value = typed_args.get("bible")
+        bible = None
+        if bible_value:
+            candidate = Path(bible_value)
+            if candidate.is_absolute():
+                try:
+                    candidate = candidate.relative_to(layout.run_root)
+                except ValueError as exc:
+                    raise ValueError("managed Bible path must remain inside the run") from exc
+            bible = layout.run_root / safe_relpath(candidate)
+        if bible is None:
+            discovered = layout.discover_bible()
+            bible = layout.run_root / discovered.markdown if discovered.markdown else None
+        document = build_document(layout.sections, bibliography, bible)
+        html_name = bible.with_suffix(".html").name if bible else assembled_html_name(layout.sections)
+        with tempfile.TemporaryDirectory(prefix="research-html-") as temporary:
+            rendered = export_html(document, Path(temporary) / html_name)
+            fs.atomic_write_bytes(html_name, rendered.path.read_bytes(), create_parents=True)
+        result.update(html=html_name, renderer=rendered.renderer)
+    return result
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sections", required=True, help="Directory of section markdown files")
-    ap.add_argument("--bibliography", required=True, help="Master bibliography file")
-    ap.add_argument("--output-dir", required=True)
+    ap.add_argument("--run-dir", help="Managed v2 run (uses canonical layout paths)")
+    ap.add_argument("--broker-endpoint", help="Manager broker endpoint for a v2 run")
+    ap.add_argument("--lease-token", help="Manager lease token for a v2 run")
+    ap.add_argument("--sections", help="Directory of section markdown files")
+    ap.add_argument("--bibliography", help="Master bibliography file")
+    ap.add_argument("--output-dir")
     ap.add_argument("--bible", help="Finished Markdown Bible to use for page metadata and basename")
     ap.add_argument("--no-html", action="store_true", help="Skip the automatic HTML companion")
     args = ap.parse_args(argv)
 
+    if args.run_dir:
+        if args.sections or args.bibliography or args.output_dir:
+            ap.error("--run-dir conflicts with --sections/--bibliography/--output-dir")
+        if not (args.broker_endpoint and args.lease_token):
+            ap.error("--run-dir requires --broker-endpoint and --lease-token")
+        layout = RunLayout.open(args.run_dir)
+        result = broker_request(
+            args.broker_endpoint,
+            args.lease_token,
+            "export",
+            options={"bible": args.bible, "no_html": args.no_html},
+        )
+        print(f"BibTeX: {layout.run_root / result['bibliography']} ({len(parse_bib_entries(layout.bibliography_md.read_text()))} entries)")
+        print(f"Claims: {layout.run_root / result['claims']} ({result['claim_count']} rows)")
+        if result.get("html"):
+            print(f"HTML: {layout.run_root / result['html']} ({result['renderer']})")
+        return 0
+    if not (args.sections and args.bibliography and args.output_dir):
+        ap.error("standalone export requires --sections, --bibliography, and --output-dir")
+
     out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    guard = standalone_mutation_guard(out_dir, operation="export research Bible")
+    guard.__enter__()
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    bib_entries = parse_bib_entries(Path(args.bibliography).read_text(encoding="utf-8", errors="replace"))
-    counter = {}
-    bibtex_lines = [to_bibtex_entry(e, counter) for e in bib_entries]
-    bib_path = out_dir / "bibliography.bib"
-    bib_path.write_text("\n\n".join(bibtex_lines), encoding="utf-8")
-    print(f"BibTeX: {bib_path} ({len(bib_entries)} entries)")
+        bib_entries = parse_bib_entries(Path(args.bibliography).read_text(encoding="utf-8", errors="replace"))
+        counter = {}
+        bibtex_lines = [to_bibtex_entry(e, counter) for e in bib_entries]
+        bib_path = out_dir / "bibliography.bib"
+        bib_path.write_text("\n\n".join(bibtex_lines), encoding="utf-8")
+        print(f"BibTeX: {bib_path} ({len(bib_entries)} entries)")
 
-    claims_path = out_dir / "claims.jsonl"
-    n = 0
-    with claims_path.open("w", encoding="utf-8") as f:
-        for row in extract_claims(Path(args.sections)):
-            f.write(json.dumps(row) + "\n")
-            n += 1
-    print(f"Claims: {claims_path} ({n} rows)")
+        claims_path = out_dir / "claims.jsonl"
+        n = 0
+        with claims_path.open("w", encoding="utf-8") as f:
+            for row in extract_claims(Path(args.sections)):
+                f.write(json.dumps(row) + "\n")
+                n += 1
+        print(f"Claims: {claims_path} ({n} rows)")
 
-    if not args.no_html:
-        try:
-            bible_path = resolve_bible_path(out_dir, Path(args.bible) if args.bible else None)
-        except ValueError as exc:
-            raise SystemExit(str(exc)) from exc
-        document = build_document(Path(args.sections), Path(args.bibliography), bible_path)
-        html_name = bible_path.with_suffix(".html").name if bible_path else assembled_html_name(Path(args.sections))
-        result = export_html(document, out_dir / html_name)
-        if result.renderer == "jimemo":
-            print(f"HTML: {result.path} (jimemo)")
-        elif result.fallback_reason == "jimemo unavailable":
-            print(f"HTML: {result.path} (built-in; jimemo unavailable)")
-        else:
-            print(f"HTML: {result.path} (built-in; {result.fallback_reason})")
+        if not args.no_html:
+            try:
+                bible_path = resolve_bible_path(out_dir, Path(args.bible) if args.bible else None)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            document = build_document(Path(args.sections), Path(args.bibliography), bible_path)
+            html_name = bible_path.with_suffix(".html").name if bible_path else assembled_html_name(Path(args.sections))
+            result = export_html(document, out_dir / html_name)
+            if result.renderer == "jimemo":
+                print(f"HTML: {result.path} (jimemo)")
+            elif result.fallback_reason == "jimemo unavailable":
+                print(f"HTML: {result.path} (built-in; jimemo unavailable)")
+            else:
+                print(f"HTML: {result.path} (built-in; {result.fallback_reason})")
+    finally:
+        guard.__exit__(*sys.exc_info())
     return 0
 
 
