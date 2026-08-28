@@ -24,6 +24,8 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from scripts.helper_runtime import standalone_mutation_guard
+
 
 PEER_REVIEWED_HINTS = [
     r"\bjournal of\b", r"\breview\b", r"\bproceedings of\b", r"\bquarterly\b",
@@ -316,16 +318,17 @@ def main():
             lines.append(f"- `{e[:240]}`")
         lines.append("")
 
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.output).write_text("\n".join(lines), encoding="utf-8")
-
-    json_path = Path(args.output).with_suffix(".json")
-    json_path.write_text(json.dumps({
-        "total": total,
-        "tier_mix": dict(counts),
-        "quality_score": round(quality_score, 3),
-        "entries": [{"tier": t, "text": e} for e, t in classified],
-    }, indent=2), encoding="utf-8")
+    output_path = Path(args.output)
+    json_path = output_path.with_suffix(".json")
+    with standalone_mutation_guard(output_path, operation="classify sources"):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("\n".join(lines), encoding="utf-8")
+        json_path.write_text(json.dumps({
+            "total": total,
+            "tier_mix": dict(counts),
+            "quality_score": round(quality_score, 3),
+            "entries": [{"tier": t, "text": e} for e, t in classified],
+        }, indent=2), encoding="utf-8")
     print(f"Report: {args.output}")
     print(f"JSON:   {json_path}")
     print(f"Quality score: {quality_score:.2f}")

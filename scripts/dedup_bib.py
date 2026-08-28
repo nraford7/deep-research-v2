@@ -21,6 +21,8 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
+from scripts.helper_runtime import standalone_mutation_guard
+
 try:
     from rapidfuzz import fuzz
     HAVE_RAPIDFUZZ = True
@@ -223,7 +225,6 @@ def main():
     print(f"Input: {total_in} entries  →  Output: {len(clusters)} unique", file=sys.stderr)
 
     out_path = Path(args.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     decisions_path = Path(args.decisions) if args.decisions else out_path.with_name("dedup-decisions.md")
 
     canonical_entries = []
@@ -252,8 +253,11 @@ def main():
     ]
     for e in canonical_entries:
         out_lines.append(f"- {e}")
-    out_path.write_text("\n".join(out_lines), encoding="utf-8")
-    decisions_path.write_text("\n".join(decisions), encoding="utf-8")
+    with standalone_mutation_guard(out_path, operation="deduplicate bibliography"):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("\n".join(out_lines), encoding="utf-8")
+        decisions_path.parent.mkdir(parents=True, exist_ok=True)
+        decisions_path.write_text("\n".join(decisions), encoding="utf-8")
     print(f"Bibliography:  {out_path}")
     print(f"Decisions log: {decisions_path}")
 

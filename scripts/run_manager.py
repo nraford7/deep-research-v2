@@ -124,7 +124,9 @@ class PrepareResult:
 
 # Task 5 fills this table with helper-specific managed entry points.  Values are
 # (module, function, exact typed argument names).
-MANAGED_HELPERS: dict[str, tuple[str, str, frozenset[str]]] = {}
+MANAGED_HELPERS: dict[str, tuple[str, str, frozenset[str]]] = {
+    "scope": ("scripts.scope", "managed_scope", frozenset({"topic", "scope", "use_llm"})),
+}
 
 
 def _helper_schemas() -> dict[str, frozenset[str]]:

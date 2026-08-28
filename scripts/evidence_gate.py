@@ -30,6 +30,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import config
+from scripts.helper_runtime import resolve_helper_layout
 from scripts.slice_search import _norm_key
 
 GATE_FAIL_EXIT = 22
@@ -67,7 +68,7 @@ def _load_slice(path):
 def evaluate(run_dir):
     """Recompute the corpus metrics from the jsonl files. Returns a diagnosis
     dict: {"passed", "global_unique", "nonempty_slices", "per_slice", "malformed"}."""
-    round1_dir = Path(run_dir) / "round1"
+    round1_dir = resolve_helper_layout(run_dir).round1
     run_cfg = config.load_run_config()
 
     per_slice = {}

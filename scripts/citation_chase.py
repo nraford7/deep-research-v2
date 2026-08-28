@@ -73,6 +73,7 @@ if _ROOT not in sys.path:
 
 import config  # noqa: F401 — imported to mirror the sibling scripts' contract
 from scripts import lit_search, slice_search
+from scripts.helper_runtime import resolve_helper_layout
 
 # Retained for callers that imported the old constants. The default pipeline now
 # cascades to Semantic Scholar and then explicit degraded mode instead of emitting
@@ -507,7 +508,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir)
-    round1_dir = run_dir / "round1"
+    layout = resolve_helper_layout(run_dir)
+    round1_dir = layout.round1
     round1_dir.mkdir(parents=True, exist_ok=True)
 
     # Bounded budget of OpenAlex HTTP requests. Every re-hydration / cites call is

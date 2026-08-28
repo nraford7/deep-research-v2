@@ -37,6 +37,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlparse, urlunparse
 
+from scripts.helper_runtime import standalone_mutation_guard
+
 try:
     import requests
     from requests.adapters import HTTPAdapter
@@ -822,30 +824,31 @@ def main():
             cited_by = r.get("cited_by", "—")
             out.append(f"- `{e[:120]}` → **{r['title'][:120]}** ({r.get('year','?')}, cited {cited_by}× via {r['source']})")
 
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.output).write_text("\n".join(out), encoding="utf-8")
+    output_path = Path(args.output)
+    json_path = output_path.with_suffix(".json")
+    with standalone_mutation_guard(output_path, operation="verify citations"):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("\n".join(out), encoding="utf-8")
+        json_path.write_text(json.dumps({
+            "files": [str(f) for f in files],
+            "stats": {
+                "inline_cites": len(all_cites),
+                "bib_entries": len(bib_unique),
+                "urls": len(all_urls),
+                "resolved": len(resolved),
+                "weak_match": len(weak_match),
+                "unresolved": len(unresolved),
+                "orphans": len(orphans),
+                "links_unresolved": len(probe_unresolved) if args.check_urls else None,
+                "links_indeterminate": len(probe_indeterminate) if args.check_urls else None,
+                "links_truncated": url_truncated if args.check_urls else None,
+            },
+            "unresolved": unresolved,
+            "orphans": orphans,
+            "links_unresolved": [{"url": u, "reason": r} for u, r in probe_unresolved],
+            "links_indeterminate": [{"url": u, "reason": r} for u, r in probe_indeterminate],
+        }, indent=2), encoding="utf-8")
     print(f"\nReport: {args.output}", flush=True)
-
-    json_path = Path(args.output).with_suffix(".json")
-    json_path.write_text(json.dumps({
-        "files": [str(f) for f in files],
-        "stats": {
-            "inline_cites": len(all_cites),
-            "bib_entries": len(bib_unique),
-            "urls": len(all_urls),
-            "resolved": len(resolved),
-            "weak_match": len(weak_match),
-            "unresolved": len(unresolved),
-            "orphans": len(orphans),
-            "links_unresolved": len(probe_unresolved) if args.check_urls else None,
-            "links_indeterminate": len(probe_indeterminate) if args.check_urls else None,
-            "links_truncated": url_truncated if args.check_urls else None,
-        },
-        "unresolved": unresolved,
-        "orphans": orphans,
-        "links_unresolved": [{"url": u, "reason": r} for u, r in probe_unresolved],
-        "links_indeterminate": [{"url": u, "reason": r} for u, r in probe_indeterminate],
-    }, indent=2), encoding="utf-8")
     print(f"JSON: {json_path}", flush=True)
 
 

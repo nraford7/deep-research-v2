@@ -25,6 +25,8 @@ import re
 import sys
 from pathlib import Path
 
+from scripts.helper_runtime import standalone_mutation_guard
+
 
 DOMAIN_RULES = {
     "medicine": {
@@ -117,6 +119,55 @@ DOMAIN_RULES = {
         "must_check": "Note study population, n, and date; flag effect-size vs significance.",
     },
 }
+
+
+def build_scope_payload(topic: str, scope_text: str = "", *, use_llm: bool = False) -> dict:
+    primary, ranked = classify_topic(topic, scope_text)
+    rule_priorities = []
+    rule_weight_against = []
+    rule_must_check = []
+    for domain in ranked:
+        configuration = DOMAIN_RULES[domain]
+        rule_priorities.extend(configuration["priority_sources"])
+        rule_weight_against.extend(configuration["weight_against"])
+        rule_must_check.append(f"({domain}) {configuration['must_check']}")
+    payload = {
+        "topic": topic,
+        "scope": scope_text,
+        "primary_domain": primary,
+        "ranked_domains": ranked,
+        "priority_sources": rule_priorities,
+        "weight_against": rule_weight_against,
+        "must_check": " | ".join(rule_must_check),
+    }
+    if use_llm:
+        proposal = llm_proposal(topic, scope_text)
+        if proposal:
+            payload["llm_proposal"] = proposal
+    proposal = payload.get("llm_proposal") or {}
+    domains = list(proposal.get("domains") or []) or infer_domains(topic, scope_text)
+    if domains:
+        payload["domains"] = domains
+    if proposal.get("fresh_since"):
+        payload["fresh_since"] = proposal["fresh_since"]
+    return payload
+
+
+def managed_scope(*, layout, fs, typed_args):
+    allowed = {"topic", "scope", "use_llm"}
+    unknown = set(typed_args) - allowed
+    if unknown:
+        raise ValueError(f"unknown scope arguments: {sorted(unknown)}")
+    topic = typed_args.get("topic")
+    if not isinstance(topic, str) or not topic.strip():
+        raise ValueError("scope topic must be nonempty")
+    scope_text = typed_args.get("scope", "")
+    if not isinstance(scope_text, str) or not isinstance(typed_args.get("use_llm", False), bool):
+        raise ValueError("scope arguments have invalid types")
+    payload = build_scope_payload(topic.strip(), scope_text, use_llm=typed_args.get("use_llm", False))
+    relative = layout.scope.relative_to(layout.run_root).as_posix()
+    fs.atomic_write_json(relative, payload, create_parents=True)
+    return {"path": relative, "primary_domain": payload["primary_domain"], "domains": payload.get("domains", [])}
 
 
 # Small static prose → institutional-hostname table. When a common institution is
@@ -325,9 +376,10 @@ def main():
                   "**Search keywords:** " + ", ".join(prop.get("search_keywords", []))]
 
     out_path = Path(args.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(lines), encoding="utf-8")
-    out_path.with_suffix(".json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    with standalone_mutation_guard(out_path, operation="write scope"):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("\n".join(lines), encoding="utf-8")
+        out_path.with_suffix(".json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"Scope: {out_path}")
     print(f"JSON:  {out_path.with_suffix('.json')}")
 

@@ -52,6 +52,8 @@ import os
 import sys
 from pathlib import Path
 
+from scripts.helper_runtime import resolve_helper_layout
+
 try:
     import requests
     from requests.adapters import HTTPAdapter
@@ -399,7 +401,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir)
-    round25_dir = run_dir / "round2_5"
+    layout = resolve_helper_layout(run_dir)
+    round25_dir = layout.round2_5
 
     # Build the allocation (bucket, question) pairs.
     if args.single_question is not None:
@@ -446,7 +449,7 @@ def main(argv=None):
               "Exa-compatible endpoint.", file=sys.stderr)
         return EXA_PREFLIGHT_EXIT
 
-    ledger = RetrievalLedger(run_dir, cap)
+    ledger = RetrievalLedger(layout, cap)
     session = make_session()
     round25_dir.mkdir(parents=True, exist_ok=True)
 

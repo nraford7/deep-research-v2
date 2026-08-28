@@ -155,7 +155,10 @@ def _row_text(row: dict, round1_dir=None) -> str:
         if not p.is_absolute():
             base = row.get("run_dir") or row.get("_run_dir") or round1_dir
             if base:
-                p = Path(base) / tp
+                base_path = Path(base)
+                if tp.startswith("Sources/") and base_path.name == "round1" and base_path.parent.name == "Process":
+                    base_path = base_path.parent.parent
+                p = base_path / tp
         try:
             parts.append(p.read_text(encoding="utf-8", errors="replace"))
         except (OSError, ValueError):

@@ -75,6 +75,8 @@ if _ROOT not in sys.path:
 
 import config
 from scripts.classify_sources import tier_of, authority_tag, descriptors_of
+from scripts.helper_runtime import enclosing_layout, resolve_helper_layout
+from scripts.run_layout import LayoutKind, RunLayout
 from scripts.cost import RETRIEVAL_FEES, RETRY_MULTIPLIER
 from scripts.ledger import RetrievalLedger, LedgerCapExceeded
 from scripts import lit_search
@@ -207,19 +209,23 @@ def _source_filename(item):
     return f"{item.get('slice', 'slice')}_{digest}.txt"
 
 
-def _spill_fulltext(items, round1_dir):
+def _spill_fulltext(items, round1_dir, *, layout=None):
     """Move each item's inline ``text`` into round1/sources/<file>.txt and replace
     it with ``text_path`` (relative to round1_dir) + ``text_chars``. Items with no
     text get text_chars=0 and no path — fetch_fulltext.py fills those later.
     Mutates items in place so the jsonl written afterwards stays lean."""
-    sources_dir = round1_dir / "sources"
+    sources_dir = layout.extracted_sources if layout is not None and layout.kind is LayoutKind.V2 else round1_dir / "sources"
     for item in items:
         text = (item.pop("text", "") or "").strip()
         if text:
             fname = _source_filename(item)
             sources_dir.mkdir(parents=True, exist_ok=True)
             (sources_dir / fname).write_text(text, encoding="utf-8")
-            item["text_path"] = f"sources/{fname}"
+            item["text_path"] = (
+                f"Sources/Extracted/{fname}"
+                if layout is not None and layout.kind is LayoutKind.V2
+                else f"sources/{fname}"
+            )
             item["text_chars"] = len(text)
         else:
             item["text_chars"] = 0
@@ -334,7 +340,8 @@ def run_slice(name, spec, topic, session, api_key, ledger, round1_dir,
         seen.add(key)
         items.append(item)
 
-    _spill_fulltext(items, round1_dir)
+    layout = getattr(ledger, "_layout", None)
+    _spill_fulltext(items, round1_dir, layout=layout)
     _write_jsonl(jsonl_path, items)
     _write_brief(brief_path, name, items)
     return len(seen), dropped
@@ -397,12 +404,13 @@ def _anchor_item(work):
     return item
 
 
-def run_anchor(topic, round1_dir):
+def run_anchor(topic, round1_dir, *, layout=None):
     """Academic anchor with an OpenAlex → Semantic Scholar fallback. $0.
 
     Semantic Scholar is called only when OpenAlex fails or returns no usable
     works. Fail-open only after both providers fail or return no results. Returns
     (unique_keys, unique_count, dropped)."""
+    layout = layout or enclosing_layout(round1_dir)
     jsonl_path = round1_dir / "slice_anchor.jsonl"
     brief_path = round1_dir / "brief_anchor.md"
     openalex_error = None
@@ -463,7 +471,7 @@ def run_anchor(topic, round1_dir):
             continue
         seen.add(key)
         items.append(item)
-    _spill_fulltext(items, round1_dir)
+    _spill_fulltext(items, round1_dir, layout=layout)
     _write_jsonl(jsonl_path, items)
     _write_brief(brief_path, "anchor", items)
     return seen, len(seen), dropped
@@ -505,7 +513,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir)
-    round1_dir = run_dir / "round1"
+    layout = resolve_helper_layout(run_dir)
+    round1_dir = layout.round1
     round1_dir.mkdir(parents=True, exist_ok=True)
 
     run_cfg = config.load_run_config()
@@ -555,7 +564,7 @@ def main(argv=None):
               "Exa-compatible endpoint.", file=sys.stderr)
         return EXA_PREFLIGHT_EXIT
 
-    ledger = RetrievalLedger(run_dir, cap)
+    ledger = RetrievalLedger(layout, cap)
     session = make_session()
 
     manifest_slices = {}
@@ -595,6 +604,9 @@ def main(argv=None):
             manifest_slices["anchor"] = {"unique": len(akeys), "dropped": 0}
             global_keys |= akeys
         else:
+            # Keep the historical two-argument call contract for integrations that
+            # replace the anchor implementation.  The real helper discovers the
+            # enclosing managed layout when it needs v2 source placement.
             akeys, aunique, adropped = run_anchor(args.topic, round1_dir)
             manifest_slices["anchor"] = {"unique": aunique, "dropped": adropped}
             global_keys |= akeys

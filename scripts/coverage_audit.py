@@ -77,6 +77,8 @@ if _ROOT not in sys.path:
 import config
 import llm
 from scripts.ledger import LedgerCapExceeded, RetrievalLedger
+from scripts.helper_runtime import resolve_helper_layout
+from scripts.run_layout import LayoutKind
 
 # slice_search returns this when a gap fetch trips the retrieval cap. We catch it
 # to write coverage_gaps.md before stopping, rather than aborting the whole run.
@@ -166,10 +168,11 @@ def _load_context(run_dir, max_chars=CONTEXT_MAX_CHARS):
     Returns a single context string. Every part is best-effort: a missing file
     contributes nothing rather than raising, the auditor must never die reading."""
     run_dir = Path(run_dir)
-    round1 = run_dir / "round1"
+    layout = resolve_helper_layout(run_dir)
+    round1 = layout.round1
     parts = []
 
-    scope = _read_text(run_dir / "scope.json")
+    scope = _read_text(layout.scope)
     if scope.strip():
         parts.append("## scope.json\n" + scope.strip())
 
@@ -202,7 +205,8 @@ def _load_context(run_dir, max_chars=CONTEXT_MAX_CHARS):
         # Full extracted page/PDF text, spilled by slice_search to sources/<file>.
         tp = row.get("text_path")
         if tp:
-            body = _read_text(round1 / tp).strip()
+            source_path = layout.run_root / tp if layout.kind is LayoutKind.V2 else round1 / tp
+            body = _read_text(source_path).strip()
             if body:
                 chunk_lines.append(body)
 
@@ -406,7 +410,7 @@ def _current_spend(run_dir):
     Used to turn --audit-usd into HEADROOM ABOVE existing spend rather than a
     reset of the cap. Best-effort: an absent/unreadable ledger reads as $0 so the
     audit can still run (slice_search re-validates the cap itself on charge)."""
-    path = Path(run_dir) / "retrieval_ledger.json"
+    path = resolve_helper_layout(run_dir).ledger
     if not path.exists():
         return 0.0
     try:
@@ -428,7 +432,7 @@ def _current_run_cap(run_dir):
     Used so the audit never passes slice_search a --max-retrieval-usd LOWER than
     the run's existing cap. Best-effort by design: a None here means "cap unknown",
     and the caller then falls back to never letting audit_usd cut below spend."""
-    path = Path(run_dir) / "retrieval_ledger.json"
+    path = resolve_helper_layout(run_dir).ledger
     if not path.exists():
         return None
     try:
@@ -529,7 +533,7 @@ def _safe_emit_matrix(use_matrix, run_dir, round1_dir, current_year):
     try:
         from scripts import coverage_matrix_adapter as cma  # lazy: keep module import light
 
-        scope_path = Path(run_dir) / "scope.json"
+        scope_path = resolve_helper_layout(run_dir).scope
         try:
             payload = json.loads(_read_text(scope_path)) if scope_path.exists() else {}
             if not isinstance(payload, dict):
@@ -579,7 +583,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir)
-    round1_dir = run_dir / "round1"
+    layout = resolve_helper_layout(run_dir)
+    round1_dir = layout.round1
     round1_dir.mkdir(parents=True, exist_ok=True)
 
     # FAIL CLOSED: every leg that "cannot run" (no provider, model raised, bad
