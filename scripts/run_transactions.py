@@ -1054,10 +1054,10 @@ def guard_legacy_mutation(path: os.PathLike[str] | str, library: os.PathLike[str
     registry = ImmutableRegistry(library)
     current = target if target.is_dir() else target.parent
     while True:
-        if registry.resolve(current) is not None:
-            raise UnsafePathError(f"legacy mutation is below immutable parent {current}")
         if current == registry.library:
             return
+        if registry.resolve(current) is not None:
+            raise UnsafePathError(f"legacy mutation is below immutable parent {current}")
         if registry.library not in current.parents:
             return
         current = current.parent

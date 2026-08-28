@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import subprocess
 import sys
 
@@ -126,3 +127,29 @@ def test_documented_direct_script_invocation_resolves_html_module(tmp_path):
 
     assert completed.returncode == 0, completed.stderr
     assert "--no-html" in completed.stdout
+
+
+def test_v2_run_export_uses_reader_and_sources_homes(tmp_path, monkeypatch):
+    run = tmp_path / "research" / "topic"
+    (run / "Process").mkdir(parents=True)
+    (run / "Sections").mkdir()
+    (run / "Sources").mkdir()
+    (run / "Process" / "run.json").write_text(json.dumps({
+        "layout_version": 2, "schema_version": 1, "slug": "topic",
+    }))
+    (run / "Sections" / "01-findings.md").write_text(
+        "# Findings\n\nSupported [Smith, 2024].\n", encoding="utf-8")
+    (run / "Sources" / "bibliography.md").write_text(
+        "# Bibliography\n\n- Smith, A. (2024). A sufficiently long source title. https://example.com/source\n",
+        encoding="utf-8",
+    )
+    bible = run / "RESEARCH-BIBLE_topic.md"
+    bible.write_text("# Topic Research Bible\n", encoding="utf-8")
+    monkeypatch.setattr("scripts.research_bible_html.shutil.which", lambda _: None)
+
+    assert export.main(["--run-dir", str(run)]) == 0
+
+    assert (run / "RESEARCH-BIBLE_topic.html").is_file()
+    assert (run / "Sources" / "bibliography.bib").is_file()
+    claim = json.loads((run / "Sources" / "claims.jsonl").read_text().splitlines()[0])
+    assert claim["file"] == "Sections/01-findings.md"
