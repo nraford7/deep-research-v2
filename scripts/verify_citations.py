@@ -30,6 +30,7 @@ import os
 import re
 import socket
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -344,6 +345,23 @@ SEMANTIC_SCHOLAR = "https://api.semanticscholar.org/graph/v1"
 SS_KEY = os.environ.get("SEMANTIC_SCHOLAR_KEY")  # optional; raises the shared free-tier rate
 OA_KEY = os.environ.get("OPENALEX_KEY")  # OpenAlex premium key; metered credit pool
 
+_S2_MIN_INTERVAL = 1.5  # seconds; S2 limit is 1 req/s CUMULATIVE across all endpoints (margin over 1.0s for their bursty fixed-window enforcement; CappedRetry absorbs stragglers)
+_s2_lock = threading.Lock()
+_s2_last_request = 0.0
+
+
+def _s2_throttle():
+    """Serialize Semantic Scholar requests to >= _S2_MIN_INTERVAL apart. The
+    S2 resolver runs inside the ThreadPoolExecutor, so multiple worker threads
+    can reach the S2 fallback at once; the lock (held across the sleep) enforces
+    the 1 req/s cumulative limit globally instead of per-thread."""
+    global _s2_last_request
+    with _s2_lock:
+        wait = _S2_MIN_INTERVAL - (time.monotonic() - _s2_last_request)
+        if wait > 0:
+            time.sleep(wait)
+        _s2_last_request = time.monotonic()
+
 
 def _oa_params(params: dict) -> dict:
     """Attach the OpenAlex API key when configured, scoped to OpenAlex requests
@@ -543,11 +561,13 @@ def resolve_semantic_scholar(s, entry: str):
     doi_match = DOI_RE.search(entry)
     try:
         if doi_match:
+            _s2_throttle()
             r = s.get(f"{SEMANTIC_SCHOLAR}/paper/DOI:{doi_match.group(0)}",
                       params={"fields": fields}, headers=headers, timeout=15)
             if r.ok:
                 return r.json()
         title = entry[:240].replace("\n", " ")
+        _s2_throttle()
         r = s.get(f"{SEMANTIC_SCHOLAR}/paper/search",
                   params={"query": title, "limit": 1, "fields": fields},
                   headers=headers, timeout=15)

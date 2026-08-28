@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -338,6 +339,23 @@ def _semantic_scholar_work_to_dict(p):
     }
 
 
+_S2_MIN_INTERVAL = 1.5  # seconds; S2 limit is 1 req/s CUMULATIVE across all endpoints (margin over 1.0s for their bursty fixed-window enforcement; CappedRetry absorbs stragglers)
+_s2_last_request = 0.0
+
+
+def _s2_throttle():
+    """Block until >= _S2_MIN_INTERVAL has elapsed since the last Semantic Scholar
+    request. S2's introductory limit is 1 request/second cumulative across EVERY
+    endpoint, so the batch / references / citations loops must self-space or they
+    429. Process-global; the pipeline runs each script as its own process and they
+    execute sequentially, so per-process spacing is sufficient in practice."""
+    global _s2_last_request
+    wait = _S2_MIN_INTERVAL - (time.monotonic() - _s2_last_request)
+    if wait > 0:
+        time.sleep(wait)
+    _s2_last_request = time.monotonic()
+
+
 def _semantic_scholar_session():
     session = _make_session()
     if SS_KEY:
@@ -369,6 +387,7 @@ def semantic_scholar_papers_by_id(ids):
     for start in range(0, len(values), 500):
         batches += 1
         try:
+            _s2_throttle()
             response = session.post(
                 f"{SEMANTIC_SCHOLAR}/paper/batch",
                 params={"fields": fields},
@@ -398,6 +417,7 @@ def semantic_scholar_references(paper_id, limit: int = 100):
     session = _semantic_scholar_session()
     fields = "title,year,citationCount,authors,venue,externalIds"
     try:
+        _s2_throttle()
         response = session.get(
             f"{SEMANTIC_SCHOLAR}/paper/{quote(str(paper_id), safe=':')}/references",
             params={"fields": fields, "limit": min(1000, max(1, limit))},
@@ -429,6 +449,7 @@ def semantic_scholar_cites(work_ids, limit: int = 25):
     failed = 0
     for paper_id in ids:
         try:
+            _s2_throttle()
             response = session.get(
                 f"{SEMANTIC_SCHOLAR}/paper/{quote(paper_id, safe=':')}/citations",
                 params={"fields": fields, "limit": min(1000, max(1, limit))},
@@ -452,10 +473,9 @@ def semantic_scholar_cites(work_ids, limit: int = 25):
 
 
 def query_semantic_scholar(topic: str, limit: int = 50):
-    s = _make_session()
-    if SS_KEY:
-        s.headers["x-api-key"] = SS_KEY
+    s = _semantic_scholar_session()
     try:
+        _s2_throttle()
         r = s.get(
             f"{SEMANTIC_SCHOLAR}/paper/search",
             params={

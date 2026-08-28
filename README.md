@@ -329,7 +329,7 @@ and host-specific examples.
 
 > **Model-ID drift warning:** Provider model IDs change over time (e.g. DeepSeek legacy IDs `deepseek-chat`/`deepseek-reasoner` retire 2026-07-24). Always verify current IDs on the provider's site. `max_tokens` must not exceed each model's output cap.
 
-**Free APIs (no key required):** OpenAlex, Crossref, Semantic Scholar (low rate).
+**Scholarly-metadata APIs:** [Crossref](https://www.crossref.org) (free, no key); [OpenAlex](https://openalex.org) (metered — set `OPENALEX_KEY`); [Semantic Scholar](https://www.semanticscholar.org) (free at low rate — set `SEMANTIC_SCHOLAR_KEY` for a 1 req/s authenticated rate). The academic anchor, citation chase, and citation verification are powered by the [Semantic Scholar Academic Graph API](https://www.semanticscholar.org/product/api) alongside OpenAlex and Crossref — see [Data sources & attribution](#data-sources--attribution).
 
 For adaptive headless batches, `scripts/batch_research.py` accepts either one question
 per line or `existing-slug<TAB>question` to resume exact named run directories.
@@ -420,3 +420,12 @@ MIT — see `LICENSE`.
 ## Credits
 
 Built for use inside Codex and Claude Code as a shared skill. Adapt freely.
+
+### Data sources & attribution
+
+This tool builds on open scholarly-metadata platforms. We gratefully acknowledge:
+
+- **[Semantic Scholar](https://www.semanticscholar.org)**, a project of the Allen Institute for AI (AI2). The academic anchor, one-hop citation chase, and citation verification use the [Semantic Scholar Academic Graph API](https://www.semanticscholar.org/product/api). Platform paper: Rodney Kinney et al., *The Semantic Scholar Open Data Platform* — [semanticscholar.org](https://www.semanticscholar.org/paper/The-Semantic-Scholar-Open-Data-Platform-Kinney-Anastasiades/cb92a7f9d9dbcf9145e32fdfa0e70e2a6b828eb1).
+- **[OpenAlex](https://openalex.org)**, an open index of scholarly works by [OurResearch](https://ourresearch.org).
+- **[Crossref](https://www.crossref.org)**, the scholarly DOI registration agency.
+- **[Exa](https://exa.ai)** for retrieval search slices.
