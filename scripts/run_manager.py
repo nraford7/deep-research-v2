@@ -631,6 +631,13 @@ def _parser() -> argparse.ArgumentParser:
     migrate.add_argument("--destination-library")
     migrate.add_argument("--dry-run", action="store_true")
     migrate.add_argument("--json", action="store_true")
+    migration_recover = subcommands.add_parser("migration-recover")
+    migration_recover.add_argument("library")
+    migration_recover.add_argument("--mode", choices=("continue", "abort"), required=True)
+    migration_recover.add_argument("--json", action="store_true")
+    rollback = subcommands.add_parser("rollback-migration")
+    rollback.add_argument("run_dir")
+    rollback.add_argument("--json", action="store_true")
     return parser
 
 
@@ -657,12 +664,22 @@ def run(argv: Sequence[str] | None = None) -> int:
             _emit(asdict(outcome))
             return int(Exit.OK)
         if arguments.command == "migrate":
-            from scripts.run_migration import discover_targets, plan_migration
+            from scripts.run_migration import apply_migration, discover_targets, plan_migration
             targets = discover_targets(arguments.path, destination_library=arguments.destination_library)
             plans = [plan_migration(target.source, target.destination_library) for target in targets]
-            if not arguments.dry_run:
-                raise ManagerError(Exit.INVALID_ARGUMENT, "migration apply is unavailable without the migration transaction unit")
-            _emit({"dry_run": True, "plans": [plan.to_dict() for plan in plans]})
+            if arguments.dry_run:
+                _emit({"dry_run": True, "plans": [plan.to_dict() for plan in plans]})
+            else:
+                migrated = [str(apply_migration(plan)) for plan in plans]
+                _emit({"dry_run": False, "migrated": migrated})
+            return int(Exit.OK)
+        if arguments.command == "migration-recover":
+            from scripts.run_migration import recover_migration
+            _emit({"outcomes": recover_migration(arguments.library, mode=arguments.mode)})
+            return int(Exit.OK)
+        if arguments.command == "rollback-migration":
+            from scripts.run_migration import rollback_migration
+            _emit({"restored": str(rollback_migration(arguments.run_dir))})
             return int(Exit.OK)
         if arguments.command == "lease":
             result = broker_request(
