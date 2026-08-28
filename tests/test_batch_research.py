@@ -2,6 +2,7 @@ from scripts import batch_research
 import pytest
 import sys
 import time
+from types import SimpleNamespace
 
 
 def test_adaptive_limit_starts_at_two_and_adds_one_per_healthy_window():
@@ -72,9 +73,8 @@ def test_prepare_jobs_isolates_slug_collisions_deduplicates_and_skips_completed(
     assert jobs[0].run_dir != jobs[1].run_dir
     assert jobs[0].log_path.parent == tmp_path / "_batch" / "logs"
 
-    (jobs[0].run_dir / "RESEARCH-BIBLE.md").write_text("done")
-    remaining = batch_research.prepare_jobs(questions, tmp_path)
-    assert [job.question for job in remaining] == ["Alpha Beta"]
+    with pytest.raises(ValueError, match="choose one of"):
+        batch_research.prepare_jobs(questions, tmp_path)
 
     reordered = batch_research.prepare_jobs(
         ["Alpha Beta", "Alpha / Beta?"], tmp_path / "reordered"
@@ -86,12 +86,8 @@ def test_prepare_jobs_isolates_slug_collisions_deduplicates_and_skips_completed(
 
 def test_prepare_jobs_keeps_slugs_stable_when_a_later_batch_adds_a_collision(tmp_path):
     original = batch_research.prepare_jobs(["Alpha / Beta?"], tmp_path)
-    original[0].run_dir.joinpath("RESEARCH-BIBLE.md").write_text("done")
-
-    remaining = batch_research.prepare_jobs(["Alpha / Beta?", "Alpha Beta"], tmp_path)
-
-    assert [job.question for job in remaining] == ["Alpha Beta"]
-    assert remaining[0].run_dir != original[0].run_dir
+    with pytest.raises(ValueError, match="choose one of"):
+        batch_research.prepare_jobs(["Alpha / Beta?", "Alpha Beta"], tmp_path)
 
 
 def test_prepare_jobs_accepts_explicit_slug_tsv_for_resuming_named_runs(tmp_path):
@@ -106,9 +102,8 @@ def test_prepare_jobs_accepts_explicit_slug_tsv_for_resuming_named_runs(tmp_path
     assert [job.question for job in jobs] == ["What is wu wei?", "What is shi?"]
     assert jobs[0].run_dir == tmp_path / "wu-wei"
 
-    (jobs[0].run_dir / "RESEARCH-BIBLE.md").write_text("done")
-    remaining = batch_research.prepare_jobs(lines, tmp_path)
-    assert [job.slug for job in remaining] == ["shi-strategy"]
+    with pytest.raises(ValueError, match="choose one of"):
+        batch_research.prepare_jobs(lines, tmp_path)
 
 
 @pytest.mark.parametrize("line", ["../escape\tQuestion", "/absolute\tQuestion", "bad slug\tQuestion"])
@@ -128,7 +123,7 @@ def test_codex_invocation_is_workspace_scoped_and_scrubs_api_routing(tmp_path):
         "codex",
         "exec",
         "-C",
-        str(job.run_dir),
+        str(job.scratch_dir),
         "--ephemeral",
         "--sandbox",
         "workspace-write",
@@ -137,7 +132,7 @@ def test_codex_invocation_is_workspace_scoped_and_scrubs_api_routing(tmp_path):
         "--skip-git-repo-check",
         "-",
     ]
-    assert invocation.cwd == job.run_dir
+    assert invocation.cwd == job.scratch_dir
     assert invocation.stdin_text is not None
     assert "QUESTION: Why adaptive scheduling?" in invocation.stdin_text
     assert str(skill_root) in invocation.stdin_text
@@ -172,7 +167,7 @@ def test_claude_requires_a_contained_runner_and_scrubs_metered_routing(tmp_path)
     assert invocation.argv.index("--allowedTools") > prompt_index
     assert "Agent" in invocation.argv
     assert "WebFetch" not in invocation.argv
-    assert invocation.cwd == job.run_dir
+    assert invocation.cwd == job.scratch_dir
     assert invocation.stdin_text is None
 
     env = batch_research.child_environment(
@@ -228,6 +223,7 @@ def test_run_batch_ramps_real_workers_and_keeps_outputs_isolated(tmp_path):
         poll_interval=0.01,
         invocation_builder=worker_invocation,
         source_env={},
+        completion_validator=lambda _run: SimpleNamespace(ok=True),
     )
 
     assert result.succeeded == 4
@@ -270,6 +266,7 @@ def test_run_batch_backs_off_after_capacity_failure_without_killing_active_work(
         poll_interval=0.01,
         invocation_builder=worker_invocation,
         source_env={},
+        completion_validator=lambda _run: SimpleNamespace(ok=True),
     )
 
     assert result.saturation_events == 1
@@ -282,6 +279,7 @@ def test_run_batch_backs_off_after_capacity_failure_without_killing_active_work(
 
 def test_run_batch_does_not_reuse_stale_capacity_signals_from_an_old_log(tmp_path):
     job = batch_research.prepare_jobs(["Ordinary failure"], tmp_path / "research")[0]
+    job.log_path.parent.mkdir(parents=True)
     job.log_path.write_text("old attempt: HTTP 429 too many requests\n")
     skill_root = tmp_path / "skill"
     skill_root.mkdir()
@@ -363,5 +361,31 @@ def test_cli_defaults_output_root_to_project_launch_directory(
     output = capsys.readouterr().out
     assert returncode == 0
     assert str(project_launch_dir) in output
-    assert (project_launch_dir / "_batch" / "logs").is_dir()
+    assert not (project_launch_dir / "_batch").exists()
     assert not (project_launch_dir / "research").exists()
+
+
+def test_batch_defaults_to_project_research_and_dry_run_writes_nothing(tmp_path):
+    jobs = batch_research.prepare_jobs(
+        ["Question"], project_dir=tmp_path, dry_run=True
+    )
+    assert jobs[0].run_dir.parent == tmp_path / "research"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_per_row_mode_overrides_global_mode(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_prepare(**kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(
+            action="plan-extend", run_dir=tmp_path / "research" / kwargs["slug"],
+            choices=(), broker_endpoint=None, lease_token=None, scratch_dir=None,
+        )
+
+    monkeypatch.setattr(batch_research, "prepare_run", fake_prepare)
+    jobs = batch_research.prepare_jobs(
+        ["topic\textend\tNew question"], project_dir=tmp_path, mode="fresh", dry_run=True
+    )
+    assert jobs[0].mode == "extend"
+    assert seen[0]["mode"] == "extend"
