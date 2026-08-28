@@ -17,7 +17,8 @@ Round 4    Mechanical citation verification (Crossref/OpenAlex) + three-state SS
              link probe + a refute-mode adversary on a different provider family + fix pass
 Round 5    (optional) Targeted rerun of a single slice or question, then re-integrate
 Index      Refresh a project-wide semantic index over every topic's Bible (bundled)
-Output     Hub-and-spoke Research Bible + BibTeX + claims.jsonl + provenance
+Output     Hub-and-spoke Research Bible (Markdown + self-contained HTML) + BibTeX
+             + claims.jsonl + provenance
              + searchable semantic index spanning every topic in the project
 ```
 
@@ -72,6 +73,9 @@ See `SKILL.md` for the full architecture, prompt templates, and failure modes.
 - **Source tier audit** — scores bibliography quality (peer-reviewed vs blog vs wiki)
 - **Missing-literature check** — compares against OpenAlex top-N to flag canonical works absent from the bibliography
 - **BibTeX + JSONL export** — machine-readable downstream consumption
+- **Automatic single-file HTML** — writes a self-contained visual Research Bible beside
+  the canonical Markdown; uses jimemo's `research-bible` template when installed and a
+  bundled visually equivalent renderer everywhere else
 - **Bundled semantic search** — the engine is bundled in this repo (`vendor/semantic_search/`); after each run, one project-wide index over every topic's Bible makes the whole research library searchable by meaning. Opt-in deps (`pip install -r requirements-search.txt`); skips gracefully (exit 0 + notice) if deps or `OPENAI_API_KEY` are absent — never breaks a run.
 
 ## Install
@@ -181,6 +185,15 @@ python3 scripts/export.py --sections "$RUN/sections/" \
   --bibliography "$RUN/sections/bibliography.md" --output-dir "$RUN/export/"
 python3 scripts/search.py index
 ```
+
+The export command automatically discovers one `RESEARCH-BIBLE*.md` in the output
+directory and writes a same-basename `.html` companion. Use `--bible PATH` when the
+finished Bible lives elsewhere. If no finished Bible is available yet, the exporter
+assembles the page from `sections/` and names it after the run without creating or
+changing Markdown. A compatible installed [jimemo](https://github.com/Joi/jimemo) is
+preferred; if it is unavailable or cannot render the `research-bible` template, the
+bundled renderer produces a self-contained, visually equivalent page instead. Pass
+`--no-html` to opt out. Markdown remains the canonical verified artifact.
 
 ### Searching what you've researched
 
@@ -350,7 +363,7 @@ per line or `existing-slug<TAB>question` to resume exact named run directories.
 | `scripts/dedup_bib.py` | DOI-normalized + fuzzy-title bibliography merge with audit log |
 | `scripts/classify_sources.py` | Tier classifier (peer-reviewed / institutional / book / news / blog / wiki) + quality score |
 | `scripts/lit_search.py` | Query OpenAlex + Semantic Scholar; optionally compare against finished bibliography to flag missing canonical works |
-| `scripts/export.py` | Emit BibTeX (`bibliography.bib`) + JSONL (`claims.jsonl`) from final Bible |
+| `scripts/export.py` | Emit BibTeX (`bibliography.bib`) + JSONL (`claims.jsonl`) and an automatic self-contained Research Bible HTML companion; prefers jimemo and falls back to the bundled renderer |
 | `scripts/search.py` | Bundled semantic search: `index` builds the project-wide index over all Bibles; a positional query searches it (`--topic` scopes to one topic). Skips gracefully without deps/key. |
 
 ## Output
@@ -365,8 +378,10 @@ research/
     │   ├── 02-<name>.md
     │   └── bibliography.md        ← Deduplicated master bibliography
     ├── export/
-    │   ├── bibliography.bib       ← BibTeX
-    │   └── claims.jsonl           ← Inline citations with surrounding sentence
+    │   ├── RESEARCH-BIBLE_<topic>.md   ← Canonical verified Research Bible
+    │   ├── RESEARCH-BIBLE_<topic>.html ← Automatic self-contained visual companion
+    │   ├── bibliography.bib            ← BibTeX
+    │   └── claims.jsonl                ← Inline citations with surrounding sentence
     ├── round4/
     │   ├── citation-verification.md  ← Mechanical OpenAlex/Crossref resolution
     │   ├── tier-report.md            ← Source quality breakdown

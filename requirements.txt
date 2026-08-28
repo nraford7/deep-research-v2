@@ -8,6 +8,7 @@ google-genai>=0.3.0
 
 # HTTP + parsing (helper scripts)
 requests>=2.31.0
+mistune>=3.0.0,<4.0.0
 
 # Full-text extraction for fetch_fulltext.py (reads OA papers / PDF white papers).
 # Without it, PDF rows skip gracefully; HTML full text still works.

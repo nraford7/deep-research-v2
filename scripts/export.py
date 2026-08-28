@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-export.py — emit BibTeX + claims JSONL from a finished Research Bible.
+export.py — emit BibTeX, claims JSONL, and Research Bible HTML.
 
 Inputs:
   - A directory containing section markdown files with [Author, Year] cites
@@ -9,6 +9,7 @@ Inputs:
 Outputs:
   - bibliography.bib  : BibTeX entries (one per bib row, key = AuthorYear)
   - claims.jsonl      : one row per inline citation with file + surrounding sentence
+  - Research Bible HTML: jimemo when compatible, otherwise a built-in page
 
 Usage:
   python3 export.py --sections research/topic/sections/ \
@@ -19,7 +20,21 @@ Usage:
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
+
+# Support both documented direct execution (`python3 scripts/export.py`) and
+# package imports (`python3 -m scripts.export`, tests).
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from scripts.research_bible_html import (
+    assembled_html_name,
+    build_document,
+    export_html,
+    resolve_bible_path,
+)
 
 
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
@@ -203,12 +218,14 @@ def extract_claims(sections_dir: Path):
             }
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sections", required=True, help="Directory of section markdown files")
     ap.add_argument("--bibliography", required=True, help="Master bibliography file")
     ap.add_argument("--output-dir", required=True)
-    args = ap.parse_args()
+    ap.add_argument("--bible", help="Finished Markdown Bible to use for page metadata and basename")
+    ap.add_argument("--no-html", action="store_true", help="Skip the automatic HTML companion")
+    args = ap.parse_args(argv)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -227,6 +244,22 @@ def main():
             f.write(json.dumps(row) + "\n")
             n += 1
     print(f"Claims: {claims_path} ({n} rows)")
+
+    if not args.no_html:
+        try:
+            bible_path = resolve_bible_path(out_dir, Path(args.bible) if args.bible else None)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        document = build_document(Path(args.sections), Path(args.bibliography), bible_path)
+        html_name = bible_path.with_suffix(".html").name if bible_path else assembled_html_name(Path(args.sections))
+        result = export_html(document, out_dir / html_name)
+        if result.renderer == "jimemo":
+            print(f"HTML: {result.path} (jimemo)")
+        elif result.fallback_reason == "jimemo unavailable":
+            print(f"HTML: {result.path} (built-in; jimemo unavailable)")
+        else:
+            print(f"HTML: {result.path} (built-in; {result.fallback_reason})")
+    return 0
 
 
 if __name__ == "__main__":

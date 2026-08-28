@@ -81,7 +81,7 @@ Round 4    GATE + ADVERSARY verify_citations.py (+ ⚠ Unresolved links) → ref
               ↓
 Round 5    RERUN (targeted) slice_search --only-slice / deepen --single-question → re-integrate
               ↓
-EXPORT     BibTeX + claims.jsonl + refresh the project-wide semantic index
+EXPORT     Markdown + automatic self-contained HTML + BibTeX + claims.jsonl + refresh the semantic index
 ```
 
 ## Stage 0: Framing (default-on, skippable)
@@ -650,6 +650,16 @@ python3 scripts/export.py \
 # skips with a notice + exits 0 if search deps / OPENAI_API_KEY absent):
 python3 scripts/search.py index
 ```
+
+HTML is additive and automatic: the canonical Markdown Bible remains unchanged. When a
+finished Bible is resolved, a same-basename self-contained `.html` companion is written
+in the export directory. Without one, the page is assembled from `sections/` and named
+`RESEARCH-BIBLE_<run-slug>.html` without synthesizing Markdown. If a compatible `jimemo`
+with the `research-bible` template is installed, the exporter uses it; otherwise every
+user receives the bundled visually equivalent page. Pass `--bible PATH` when the finished
+Bible is outside the export directory or its basename should control the HTML name. Pass
+`--no-html` to retain the former BibTeX-and-claims-only behavior. For slot mapping,
+normalization, safety, and fallback details, read `references/jimemo-export.md`.
 
 ## Cost table
 
