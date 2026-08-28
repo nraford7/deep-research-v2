@@ -1,6 +1,6 @@
 # Run: coverage-matrix-integration
 Instruction: /do-it "for the next steps to completion" — wire the coverage-matrix core (scripts/coverage_matrix.py) into the live scope → slice_search → coverage_audit chain. User-chosen approach: ADDITIVE ADAPTER, opt-in, default-safe — expose matrix-driven selection without changing default pipeline behavior; all 430 existing tests stay green. "Complete" = fully wired and runnable behind an opt-in flag, not the forced default. Target: ~/Projects/deeper-research, branch feat/source-selection-protocol (continues prior run).
-Stage: committing
+Stage: done
 Rung: medium (start-floor medium: constraint-lens, BR1 REV1 NOV1 INT0 FC1 = 4)
 Lens (mandatory every review pass): "ALL 430 existing tests stay green" · "default path (flag unset) byte-for-byte unchanged" · "NOT the forced default"
 Fresheyes note: fresheyes.sh not installed in current plugins tree (only backups). Watchdog-Protocol fallback: independent MODEL kept for code review via roborev/codex (where independence matters most per rung rationale); spec/plan use independent-CONTEXT general-purpose subagents. Surfaced per protocol.
