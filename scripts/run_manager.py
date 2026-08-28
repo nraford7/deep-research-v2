@@ -359,18 +359,45 @@ def prepare_run(
     if collision is not None and mode == "extend":
         if "extend" not in collision.choices:
             raise ManagerError(Exit.UNSAFE_INHERITANCE, f"extension is unavailable for {collision.classification}")
+        from scripts.run_extension import ExtensionError, ExtensionPlan, prepare_extension
+        try:
+            extension = prepare_extension(collision.path, question.strip(), dry_run=dry_run)
+        except ExtensionError as exc:
+            raise ManagerError(Exit.UNSAFE_INHERITANCE, str(exc)) from exc
         if dry_run:
+            assert isinstance(extension, PrepareResult)
             return PrepareResult(
                 "plan-extend",
-                collision.path,
+                extension.run_dir,
                 collision.choices,
                 project_dir=resolved.project,
                 library_dir=library,
-                slug=base_slug,
+                slug=extension.slug,
                 classification=collision.classification,
+                layout_version=2,
+                schema_version=1,
                 write_probe_pending=True,
             )
-        raise ManagerError(Exit.UNSAFE_INHERITANCE, "extension support is installed by the extension unit")
+        assert isinstance(extension, ExtensionPlan)
+        prepared = extension.prepared
+        return PrepareResult(
+            "extended",
+            extension.child,
+            collision.choices,
+            lease_id=prepared.lease_id,
+            lease_token=prepared.lease_token,
+            lease_keeper_pid=prepared.lease_keeper_pid,
+            renewed_until=prepared.renewed_until,
+            broker_endpoint=prepared.broker_endpoint,
+            scratch_dir=prepared.scratch_dir,
+            project_dir=resolved.project,
+            library_dir=library,
+            slug=extension.child.name,
+            classification="extension",
+            layout_version=2,
+            schema_version=1,
+            transaction_id=prepared.transaction_id,
+        )
 
     if dry_run:
         capabilities = capabilities_for_dry_run(library)
