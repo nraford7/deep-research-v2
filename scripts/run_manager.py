@@ -626,6 +626,11 @@ def _parser() -> argparse.ArgumentParser:
     recover.add_argument("--library-dir", required=True)
     recover.add_argument("--transaction-id", required=True)
     recover.add_argument("--json", action="store_true")
+    migrate = subcommands.add_parser("migrate")
+    migrate.add_argument("path", help="legacy run, research library, or project")
+    migrate.add_argument("--destination-library")
+    migrate.add_argument("--dry-run", action="store_true")
+    migrate.add_argument("--json", action="store_true")
     return parser
 
 
@@ -650,6 +655,14 @@ def run(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "recover":
             outcome = recover_creation(arguments.library_dir, arguments.transaction_id)
             _emit(asdict(outcome))
+            return int(Exit.OK)
+        if arguments.command == "migrate":
+            from scripts.run_migration import discover_targets, plan_migration
+            targets = discover_targets(arguments.path, destination_library=arguments.destination_library)
+            plans = [plan_migration(target.source, target.destination_library) for target in targets]
+            if not arguments.dry_run:
+                raise ManagerError(Exit.INVALID_ARGUMENT, "migration apply is unavailable without the migration transaction unit")
+            _emit({"dry_run": True, "plans": [plan.to_dict() for plan in plans]})
             return int(Exit.OK)
         if arguments.command == "lease":
             result = broker_request(
