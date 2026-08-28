@@ -516,12 +516,16 @@ def _run_evidence_gate(run_dir):
     return proc.returncode
 
 
-def _safe_emit_matrix(run_dir, round1_dir, current_year):
-    """OPT-IN report emitter for --use-matrix. Reads the run's scope.json
-    (best-effort), builds the coverage matrix from the round1 slice rows, and
-    writes round1/coverage_matrix.json + one status line. The ENTIRE body is
-    wrapped so it can raise nothing and returns nothing — it can never change the
-    audit's return code. Called only on the audit's success paths."""
+def _safe_emit_matrix(use_matrix, run_dir, round1_dir, current_year):
+    """OPT-IN report emitter for --use-matrix. A no-op unless ``use_matrix`` is
+    set, so the whole opt-in decision lives here (call sites stay unconditional).
+    When enabled: reads the run's scope.json (best-effort), builds the coverage
+    matrix from the round1 slice rows, and writes round1/coverage_matrix.json +
+    one status line. The ENTIRE body is wrapped so it can raise nothing and
+    returns nothing — it can never change the audit's return code. Called only on
+    the audit's success paths."""
+    if not use_matrix:
+        return
     try:
         from scripts import coverage_matrix_adapter as cma  # lazy: keep module import light
 
@@ -602,8 +606,7 @@ def main(argv=None):
 
             if not gaps:
                 print(f"Coverage audit round {round_no}: no material gaps, stopping.")
-                if args.use_matrix:
-                    _safe_emit_matrix(run_dir, round1_dir, args.current_year)
+                _safe_emit_matrix(args.use_matrix, run_dir, round1_dir, args.current_year)
                 return 0
 
             seen_names = set()
@@ -682,12 +685,10 @@ def main(argv=None):
             context = _load_context(run_dir)
             if not gaps_remain(provider, args.topic, context):
                 print(f"Coverage audit round {round_no}: gaps filled, none remain, stopping.")
-                if args.use_matrix:
-                    _safe_emit_matrix(run_dir, round1_dir, args.current_year)
+                _safe_emit_matrix(args.use_matrix, run_dir, round1_dir, args.current_year)
                 return 0
 
-        if args.use_matrix:
-            _safe_emit_matrix(run_dir, round1_dir, args.current_year)
+        _safe_emit_matrix(args.use_matrix, run_dir, round1_dir, args.current_year)
         print(f"Coverage audit: reached --max-audit-rounds ({args.max_audit_rounds}), stopping.")
         return 0
 

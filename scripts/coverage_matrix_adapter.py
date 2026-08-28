@@ -171,7 +171,7 @@ def matrix_report(matrix: CoverageMatrix) -> dict:
         "empty_cells": empty,
         "single_primary_cells": single,
         "primaries": len(matrix.primaries()),
-        "n_required": len(matrix._required),
-        "n_sources": len(matrix._sources),
+        "n_required": matrix.n_required(),
+        "n_sources": matrix.n_sources(),
         "coverage_note": _COVERAGE_NOTE,
     }

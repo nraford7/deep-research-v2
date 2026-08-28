@@ -50,10 +50,15 @@ def _seed_run(tmp_path):
     return round1
 
 
-def test_use_matrix_writes_report(monkeypatch, tmp_path):
+def _setup(monkeypatch, tmp_path):
+    """Patch provider + zero-gaps LLM and seed a run dir; return round1 path."""
     _patch_provider(monkeypatch)
     _patch_no_gaps(monkeypatch)
-    round1 = _seed_run(tmp_path)
+    return _seed_run(tmp_path)
+
+
+def test_use_matrix_writes_report(monkeypatch, tmp_path):
+    round1 = _setup(monkeypatch, tmp_path)
 
     rc = coverage_audit.main([
         "--run-dir", str(tmp_path), "--topic", "widgets",
@@ -69,9 +74,7 @@ def test_use_matrix_writes_report(monkeypatch, tmp_path):
 
 
 def test_default_off_no_report(monkeypatch, tmp_path):
-    _patch_provider(monkeypatch)
-    _patch_no_gaps(monkeypatch)
-    round1 = _seed_run(tmp_path)
+    round1 = _setup(monkeypatch, tmp_path)
 
     rc = coverage_audit.main([
         "--run-dir", str(tmp_path), "--topic", "widgets",
@@ -82,9 +85,7 @@ def test_default_off_no_report(monkeypatch, tmp_path):
 
 
 def test_matrix_build_error_does_not_change_rc(monkeypatch, tmp_path):
-    _patch_provider(monkeypatch)
-    _patch_no_gaps(monkeypatch)
-    round1 = _seed_run(tmp_path)
+    round1 = _setup(monkeypatch, tmp_path)
 
     def boom(*a, **k):
         raise RuntimeError("intentional adapter failure")
@@ -102,9 +103,7 @@ def test_emit_survives_broken_stderr(monkeypatch, tmp_path):
     during a matrix-build failure must still leave the audit's rc unchanged."""
     import builtins
 
-    _patch_provider(monkeypatch)
-    _patch_no_gaps(monkeypatch)
-    _seed_run(tmp_path)
+    _setup(monkeypatch, tmp_path)
 
     def boom(*a, **k):
         raise RuntimeError("adapter down")

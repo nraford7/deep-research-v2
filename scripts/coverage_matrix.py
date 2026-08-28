@@ -221,3 +221,11 @@ class CoverageMatrix:
 
     def primaries(self) -> list[str]:
         return sorted({s.primary_id for s in self._sources})
+
+    def n_required(self) -> int:
+        """Count of required cells (public accessor for reporting)."""
+        return len(self._required)
+
+    def n_sources(self) -> int:
+        """Count of admitted sources (public accessor for reporting)."""
+        return len(self._sources)
