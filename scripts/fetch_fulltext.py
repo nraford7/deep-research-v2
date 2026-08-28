@@ -55,6 +55,8 @@ DEFAULT_MAX_CHARS = int(os.environ.get("DR_FULLTEXT_MAX_CHARS", "20000"))
 MAX_REDIRECTS = 5
 OPENALEX = "https://api.openalex.org"
 CONTACT = os.environ.get("CONTACT_EMAIL", "anonymous@example.com")
+OA_KEY = os.environ.get("OPENALEX_KEY")  # OpenAlex premium key; metered credit pool
+_OA_KEY_SUFFIX = f"&api_key={OA_KEY}" if OA_KEY else ""
 
 
 # --------------------------------------------------------------------------- #
@@ -242,7 +244,7 @@ def _best_oa_pdf_from_work(work: dict) -> str | None:
 def _openalex_oa_pdf(doi: str, timeout: int) -> str | None:
     """Ask OpenAlex for an open-access PDF url for ``doi`` (free API, no key).
     The lookup itself goes through the same safe fetch. Returns a url or None."""
-    api = f"{OPENALEX}/works/doi:{doi}?mailto={CONTACT}"
+    api = f"{OPENALEX}/works/doi:{doi}?mailto={CONTACT}{_OA_KEY_SUFFIX}"
     data, ctype_or_reason, _ = _safe_get(api, 2_000_000, timeout)
     if data is None:
         return None
@@ -257,7 +259,7 @@ def _openalex_oa_pdf_by_id(work_id: str, timeout: int) -> str | None:
     """Resolve an open-access PDF url from a bare OpenAlex W-id (DOI-less rows).
     GETs works/<Wid> and reads best_oa_location.pdf_url (or oa_url / primary
     pdf_url). Same free API, same safe fetch. Returns a url or None."""
-    api = f"{OPENALEX}/works/{work_id}?mailto={CONTACT}"
+    api = f"{OPENALEX}/works/{work_id}?mailto={CONTACT}{_OA_KEY_SUFFIX}"
     data, ctype_or_reason, _ = _safe_get(api, 2_000_000, timeout)
     if data is None:
         return None

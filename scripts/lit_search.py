@@ -8,7 +8,8 @@ Used for two purposes:
   2. MISSING-LIT CHECK — compare a finished bibliography against the top-N
      highly-cited works in the topic area; flag major works absent.
 
-OpenAlex: free, no key.
+OpenAlex: metered — every request bills a prepaid credit pool; set OPENALEX_KEY
+  (unauthenticated requests now 429). See https://openalex.org/pricing.
 Semantic Scholar: free for low volume; set SEMANTIC_SCHOLAR_KEY for higher rate.
 
 Usage:
@@ -115,9 +116,19 @@ def _normalize_doi(value):
 
 CONTACT = os.environ.get("CONTACT_EMAIL", "anonymous@example.com")
 SS_KEY = os.environ.get("SEMANTIC_SCHOLAR_KEY")
+OA_KEY = os.environ.get("OPENALEX_KEY")  # OpenAlex premium key; metered credit pool
 OPENALEX = "https://api.openalex.org"
 SEMANTIC_SCHOLAR = "https://api.semanticscholar.org/graph/v1"
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
+
+
+def _oa_params(params: dict) -> dict:
+    """Attach the OpenAlex API key when configured. Passed as a query param (not
+    a session header) so the key stays scoped to OpenAlex requests only and is
+    never leaked onto a session shared with Semantic Scholar or Crossref."""
+    if OA_KEY:
+        return {**params, "api_key": OA_KEY}
+    return params
 
 
 def query_openalex(topic: str, limit: int = 50):
@@ -127,13 +138,13 @@ def query_openalex(topic: str, limit: int = 50):
     per_page = min(50, limit)
     pages = (limit + per_page - 1) // per_page
     for page in range(1, pages + 1):
-        r = s.get(f"{OPENALEX}/works", params={
+        r = s.get(f"{OPENALEX}/works", params=_oa_params({
             "search": topic,
             "per-page": per_page,
             "page": page,
             "sort": "cited_by_count:desc",
             "mailto": CONTACT,
-        }, timeout=30)
+        }), timeout=30)
         if not r.ok:
             break
         for w in r.json().get("results", []):
@@ -217,12 +228,12 @@ def openalex_cites(work_ids, limit: int = 25):
         batches += 1
         batch = bare[i:i + 50]
         try:
-            r = s.get(f"{OPENALEX}/works", params={
+            r = s.get(f"{OPENALEX}/works", params=_oa_params({
                 "filter": f"cites:{'|'.join(batch)}",
                 "sort": "cited_by_count:desc",
                 "per-page": limit,
                 "mailto": CONTACT,
-            }, timeout=30)
+            }), timeout=30)
         except requests.RequestException:
             # Transport error on this batch — partial-tolerant: record it as a
             # failed batch and CONTINUE the remaining batches.
@@ -289,11 +300,11 @@ def openalex_works_by_id(ids):
             counts["batches"] += 1
             batch = values[i:i + 50]
             try:
-                r = s.get(f"{OPENALEX}/works", params={
+                r = s.get(f"{OPENALEX}/works", params=_oa_params({
                     "filter": f"{filter_key}:{'|'.join(batch)}",
                     "per-page": 50,
                     "mailto": CONTACT,
-                }, timeout=30)
+                }), timeout=30)
             except requests.RequestException:
                 counts["failed"] += 1
                 continue

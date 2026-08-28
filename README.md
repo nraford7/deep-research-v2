@@ -286,7 +286,8 @@ concurrency changes throughput, not per-question budgets or evidence gates.
 | `OPENAI_API_KEY` | ChatGPT | https://platform.openai.com |
 | `GOOGLE_API_KEY` | Gemini | https://aistudio.google.com/apikey |
 | `XAI_API_KEY` | Grok | https://console.x.ai |
-| `SEMANTIC_SCHOLAR_KEY` | Optional — raises rate limit on `lit_search.py` | https://www.semanticscholar.org/product/api |
+| `OPENALEX_KEY` | Recommended — OpenAlex now meters every request against a prepaid credit pool; without a key the academic anchor / lit_search / OA-PDF lookups 429 | https://openalex.org/pricing |
+| `SEMANTIC_SCHOLAR_KEY` | Optional — sent as `x-api-key`, lifts `lit_search.py` off the shared anonymous rate limit (1 req/s introductory) | https://www.semanticscholar.org/product/api |
 | `CONTACT_EMAIL` | Optional — joins OpenAlex/Crossref "polite pool" | — |
 
 The dispatcher reads from `~/.env` and `./.env` automatically. Or export them in your shell.

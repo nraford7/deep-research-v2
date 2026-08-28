@@ -342,6 +342,15 @@ OPENALEX = "https://api.openalex.org"
 CROSSREF = "https://api.crossref.org"
 SEMANTIC_SCHOLAR = "https://api.semanticscholar.org/graph/v1"
 SS_KEY = os.environ.get("SEMANTIC_SCHOLAR_KEY")  # optional; raises the shared free-tier rate
+OA_KEY = os.environ.get("OPENALEX_KEY")  # OpenAlex premium key; metered credit pool
+
+
+def _oa_params(params: dict) -> dict:
+    """Attach the OpenAlex API key when configured, scoped to OpenAlex requests
+    (query param, never a shared session header)."""
+    if OA_KEY:
+        return {**params, "api_key": OA_KEY}
+    return params
 
 # Citation patterns — broadened to handle:
 #   [Smith, 2020]                 — solo author            (ACADEMIC)
@@ -495,11 +504,11 @@ def resolve_openalex(s, entry: str):
     doi_match = DOI_RE.search(entry)
     try:
         if doi_match:
-            r = s.get(f"{OPENALEX}/works/doi:{doi_match.group(0).lower()}", params={"mailto": CONTACT}, timeout=15)
+            r = s.get(f"{OPENALEX}/works/doi:{doi_match.group(0).lower()}", params=_oa_params({"mailto": CONTACT}), timeout=15)
             if r.ok:
                 return r.json()
         title = entry[:240].replace("\n", " ")
-        r = s.get(f"{OPENALEX}/works", params={"search": title, "per-page": 1, "mailto": CONTACT}, timeout=15)
+        r = s.get(f"{OPENALEX}/works", params=_oa_params({"search": title, "per-page": 1, "mailto": CONTACT}), timeout=15)
         if r.ok:
             results = r.json().get("results", [])
             return results[0] if results else None
