@@ -12,6 +12,7 @@ import hashlib
 import importlib
 import json
 import multiprocessing
+from multiprocessing import process as multiprocessing_process
 import os
 from pathlib import Path
 import re
@@ -504,10 +505,9 @@ def validate_broker_request(
     if not isinstance(request.get("token"), str):
         raise BrokerProtocolError("broker token must be a string")
     if action == "publish-artifact":
-        if not isinstance(request.get("logical_destination"), str) or any(
-            marker in request["logical_destination"] for marker in ("/", "\\", "..")
-        ):
-            raise BrokerProtocolError("logical destination must be an allowlisted identifier")
+        if not isinstance(request.get("logical_destination"), str):
+            raise BrokerProtocolError("logical destination must be a safe relative path")
+        safe_relpath(request["logical_destination"])
         scratch_name = request.get("scratch_name")
         if not isinstance(scratch_name, str):
             raise BrokerProtocolError("scratch_name must be a safe relative path")
@@ -618,12 +618,14 @@ def _broker_main(
             dispatcher = _default_broker_dispatch
         running = True
         while running:
-            if os.getppid() != parent_pid or _process_start_identity(parent_pid) != parent_start:
-                break
+            parent_present = os.getppid() == parent_pid and _process_start_identity(parent_pid) == parent_start
             try:
                 client, _ = server.accept()
             except TimeoutError:
-                lease.renew(lease.owner.token, ttl_seconds=ttl_seconds)
+                if parent_present:
+                    lease.renew(lease.owner.token, ttl_seconds=ttl_seconds)
+                elif _parse_iso(lease.owner.renewed_until) <= _utc_now():
+                    break
                 continue
             with client:
                 client.settimeout(5)
@@ -651,6 +653,8 @@ def _broker_main(
                             else dispatcher(validated, context, lease)
                         )
                         response = {"ok": True, "result": result}
+                        if validated["action"] == "finalize":
+                            running = False
                 except Exception as exc:
                     response = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
                 client.sendall((json.dumps(response, sort_keys=True) + "\n").encode("utf-8"))
@@ -686,28 +690,12 @@ class LocalBrokerClient:
     process: multiprocessing.Process
 
     def request(self, action: str, **payload: Any) -> Any:
-        request = {"action": action, "token": self.owner.token, **payload}
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            client.settimeout(5)
-            client.connect(str(self.socket_path))
-            client.sendall((json.dumps(request, sort_keys=True) + "\n").encode("utf-8"))
-            received = bytearray()
-            while b"\n" not in received:
-                chunk = client.recv(65536)
-                if not chunk:
-                    break
-                received.extend(chunk)
-            response = json.loads(bytes(received).split(b"\n", 1)[0].decode("utf-8"))
-        finally:
-            client.close()
-        if not response.get("ok"):
-            raise BrokerProtocolError(response.get("error", "broker request failed"))
-        if action == "renew" and isinstance(response.get("result"), dict):
-            renewed = response["result"].get("renewed_until")
+        result = broker_request(self.socket_path, self.owner.token, action, **payload)
+        if action == "renew" and isinstance(result, dict):
+            renewed = result.get("renewed_until")
             if isinstance(renewed, str):
                 self.owner = replace(self.owner, renewed_until=renewed)
-        return response.get("result")
+        return result
 
     def release(self) -> None:
         if self.process.is_alive():
@@ -715,6 +703,32 @@ class LocalBrokerClient:
             self.process.join(timeout=5)
         if self.process.is_alive():
             raise BrokerProtocolError("broker did not stop after authenticated release")
+
+
+def broker_request(
+    endpoint: os.PathLike[str] | str,
+    token: str,
+    action: str,
+    **payload: Any,
+) -> Any:
+    request = {"action": action, "token": token, **payload}
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.settimeout(5)
+        client.connect(os.fspath(endpoint))
+        client.sendall((json.dumps(request, sort_keys=True) + "\n").encode("utf-8"))
+        received = bytearray()
+        while b"\n" not in received:
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            received.extend(chunk)
+        response = json.loads(bytes(received).split(b"\n", 1)[0].decode("utf-8"))
+    finally:
+        client.close()
+    if not response.get("ok"):
+        raise BrokerProtocolError(response.get("error", "broker request failed"))
+    return response.get("result")
 
 
 def start_local_broker(
@@ -728,7 +742,20 @@ def start_local_broker(
     dispatcher_name: str | None = None,
     context: Mapping[str, Any] | None = None,
     allowed_helpers: Mapping[str, frozenset[str]] | None = None,
+    detached: bool = False,
 ) -> LocalBrokerClient:
+    if detached:
+        return _start_detached_broker(
+            library,
+            key,
+            operation=operation,
+            shared=shared,
+            ttl_seconds=ttl_seconds,
+            dispatcher_module=dispatcher_module,
+            dispatcher_name=dispatcher_name,
+            context=context,
+            allowed_helpers=allowed_helpers,
+        )
     receive, send = multiprocessing.Pipe(duplex=False)
     parent_pid = os.getpid()
     parent_start = _process_start_identity(parent_pid)
@@ -761,6 +788,11 @@ def start_local_broker(
     if not ready.get("ok"):
         process.join(timeout=2)
         raise BrokerProtocolError(ready.get("error", "broker startup failed"))
+    # The broker is deliberately lease-owned rather than parent-lifetime-owned. Remove
+    # it from multiprocessing's atexit join set so a short-lived CLI can return the
+    # endpoint immediately; once orphaned it serves authenticated requests until the
+    # renewable lease expires, then removes its holder and socket.
+    multiprocessing_process._children.discard(process)
     return LocalBrokerClient(
         Path(library).resolve(strict=True),
         key,
@@ -768,6 +800,137 @@ def start_local_broker(
         Path(ready["socket_path"]),
         process,
     )
+
+
+@dataclass
+class _DetachedProcess:
+    popen: subprocess.Popen[Any]
+
+    @property
+    def pid(self) -> int:
+        return self.popen.pid
+
+    def is_alive(self) -> bool:
+        return self.popen.poll() is None
+
+    def join(self, timeout: float | None = None) -> None:
+        try:
+            self.popen.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+class _ReadyFileConnection:
+    def __init__(self, ready_path: Path):
+        self.ready_path = ready_path
+        self.sent = False
+
+    def send(self, payload: Mapping[str, Any]) -> None:
+        if not self.sent:
+            _atomic_json(self.ready_path, dict(payload))
+            self.sent = True
+
+    def close(self) -> None:
+        pass
+
+
+def _serve_detached_broker(config_path: Path) -> None:
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    connection = _ReadyFileConnection(Path(config["ready_path"]))
+    _broker_main(
+        connection,
+        config["library"],
+        config["key"],
+        config["operation"],
+        bool(config["shared"]),
+        float(config["ttl_seconds"]),
+        config.get("dispatcher_module"),
+        config.get("dispatcher_name"),
+        config.get("context", {}),
+        {key: frozenset(value) for key, value in config.get("allowed_helpers", {}).items()},
+        0,
+        None,
+    )
+
+
+def _start_detached_broker(
+    library: os.PathLike[str] | str,
+    key: str,
+    *,
+    operation: str,
+    shared: bool,
+    ttl_seconds: float,
+    dispatcher_module: str | None,
+    dispatcher_name: str | None,
+    context: Mapping[str, Any] | None,
+    allowed_helpers: Mapping[str, frozenset[str]] | None,
+) -> LocalBrokerClient:
+    library_path = Path(library).resolve(strict=True)
+    launch_id = str(uuid.uuid4())
+    control_root = library_path / ".transactions" / f"broker-{launch_id}"
+    control_root.mkdir(parents=True, mode=0o700)
+    config_path = control_root / "config.json"
+    ready_path = control_root / "ready.json"
+    log_path = control_root / "broker.log"
+    _atomic_json(
+        config_path,
+        {
+            "library": str(library_path),
+            "key": key,
+            "operation": operation,
+            "shared": shared,
+            "ttl_seconds": ttl_seconds,
+            "dispatcher_module": dispatcher_module,
+            "dispatcher_name": dispatcher_name,
+            "context": dict(context or {}),
+            "allowed_helpers": {name: sorted(fields) for name, fields in (allowed_helpers or {}).items()},
+            "ready_path": str(ready_path),
+        },
+    )
+    repository_root = Path(__file__).resolve().parents[1]
+    with log_path.open("ab") as log_handle:
+        popen = subprocess.Popen(
+            [sys.executable, "-m", "scripts.run_transactions", "--serve-broker", str(config_path)],
+            cwd=repository_root,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not ready_path.exists():
+        if popen.poll() is not None:
+            detail = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+            raise BrokerProtocolError(f"detached broker failed to start: {detail.strip()}")
+        time.sleep(0.02)
+    if not ready_path.exists():
+        popen.terminate()
+        popen.wait(timeout=2)
+        raise BrokerProtocolError("detached broker did not become ready")
+    ready = json.loads(ready_path.read_text(encoding="utf-8"))
+    if not ready.get("ok"):
+        popen.wait(timeout=2)
+        raise BrokerProtocolError(ready.get("error", "detached broker startup failed"))
+    return LocalBrokerClient(
+        library_path,
+        key,
+        LeaseOwner(**ready["owner"]),
+        Path(ready["socket_path"]),
+        _DetachedProcess(popen),  # type: ignore[arg-type]
+    )
+
+
+def _module_main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--serve-broker")
+    arguments = parser.parse_args(argv)
+    if arguments.serve_broker:
+        _serve_detached_broker(Path(arguments.serve_broker))
+        return 0
+    return 2
 
 
 @dataclass(frozen=True)
@@ -1123,9 +1286,14 @@ __all__ = [
     "TreeEntry",
     "TreeInventory",
     "create_skeleton_transaction",
+    "broker_request",
     "guard_legacy_mutation",
     "publish_skeleton",
     "recover_creation",
     "start_local_broker",
     "validate_broker_request",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(_module_main())
