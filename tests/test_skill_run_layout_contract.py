@@ -4,7 +4,7 @@ from pathlib import Path
 def test_skill_documents_project_local_v2_and_four_collision_choices():
     text = Path("SKILL.md").read_text(encoding="utf-8")
     for token in [
-        "<project>/research/<run-slug>", "Sections/", "Sources/Extracted/",
+        "<project>/Deeper_Research/<run-slug>", "Sections/", "Sources/Extracted/",
         "Process/", "Resume", "Extend", "Start fresh", "Cancel",
     ]:
         assert token in text

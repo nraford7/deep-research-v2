@@ -362,14 +362,14 @@ def test_cli_defaults_output_root_to_project_launch_directory(
     assert returncode == 0
     assert str(project_launch_dir) in output
     assert not (project_launch_dir / "_batch").exists()
-    assert not (project_launch_dir / "research").exists()
+    assert not (project_launch_dir / "Deeper_Research").exists()
 
 
 def test_batch_defaults_to_project_research_and_dry_run_writes_nothing(tmp_path):
     jobs = batch_research.prepare_jobs(
         ["Question"], project_dir=tmp_path, dry_run=True
     )
-    assert jobs[0].run_dir.parent == tmp_path / "research"
+    assert jobs[0].run_dir.parent == tmp_path / "Deeper_Research"
     assert list(tmp_path.iterdir()) == []
 
 

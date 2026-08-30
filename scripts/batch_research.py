@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import time
 
+from scripts.run_layout import LEGACY_LIBRARY_DIRNAMES, LIBRARY_DIRNAME
 from scripts.run_manager import ManagerError, prepare_run
 from scripts.run_state import validate_completion
 
@@ -93,8 +94,9 @@ def prepare_jobs(
         raise ValueError("output_root and library_dir are aliases; pass only one")
     direct_library = library_dir if library_dir is not None else output_root
     captured_project = Path(project_dir or Path.cwd()).resolve() if direct_library is None else None
+    _lib_names = {LIBRARY_DIRNAME.casefold(), *(n.casefold() for n in LEGACY_LIBRARY_DIRNAMES)}
     library = Path(direct_library).resolve() if direct_library is not None else (
-        captured_project if captured_project.name == "research" else captured_project / "research"
+        captured_project if captured_project.name.casefold() in _lib_names else captured_project / LIBRARY_DIRNAME
     )
     logs_dir = library / "_batch" / "logs"
     seen_questions = set()

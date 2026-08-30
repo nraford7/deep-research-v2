@@ -19,7 +19,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.run_layout import LayoutError, LayoutKind, RunLayout
+from scripts.run_layout import LayoutError, LayoutKind, LIBRARY_DIRNAME, RunLayout
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BIBLE_GLOBS = ["*/README.md", "*/sections/*.md"]
@@ -138,7 +138,7 @@ def _resolve_key() -> bool:
 
 
 def _research_root(arg_root) -> Path:
-    return Path(arg_root).resolve() if arg_root else (Path.cwd() / "research").resolve()
+    return Path(arg_root).resolve() if arg_root else (Path.cwd() / LIBRARY_DIRNAME).resolve()
 
 
 def _do_index(root: Path) -> int:

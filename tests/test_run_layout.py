@@ -104,7 +104,8 @@ def test_empty_directory_requires_explicit_unmanaged_mode(tmp_path: Path) -> Non
 
 
 def test_project_and_direct_library_resolution_are_distinct(tmp_path: Path) -> None:
-    assert resolve_project_root(project_dir=tmp_path).library == tmp_path.resolve() / "research"
+    assert resolve_project_root(project_dir=tmp_path).library == tmp_path.resolve() / "Deeper_Research"
+    # A project dir already named with a recognised library name is used in place (incl. legacy "research").
     research = tmp_path / "research"
     assert resolve_project_root(project_dir=research).library == research.resolve()
     custom = tmp_path / "custom"

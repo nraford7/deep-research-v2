@@ -26,6 +26,12 @@ SLUG_VERSION = "slug-v1"
 UNICODE_VERSION = "15.0.0"
 MAX_COMPONENT_BYTES = 120
 
+# Directory name that holds run libraries (bibles + working files) inside a project.
+# Single source of truth — sibling scripts import this rather than hardcoding the name.
+LIBRARY_DIRNAME = "Deeper_Research"
+# Legacy names still recognised when discovering pre-existing libraries (e.g. migration).
+LEGACY_LIBRARY_DIRNAMES = ("research",)
+
 _DEVICE_NAMES = {
     "con",
     "prn",
@@ -112,7 +118,8 @@ def resolve_project_root(
         return ResolvedRoot(project=None, library=_absolute(direct_values[0]))
 
     project = _absolute(project_dir if project_dir is not None else launch_dir or Path.cwd())
-    library = project if project.name.casefold() == "research" else project / "research"
+    _library_names = {LIBRARY_DIRNAME.casefold(), *(n.casefold() for n in LEGACY_LIBRARY_DIRNAMES)}
+    library = project if project.name.casefold() in _library_names else project / LIBRARY_DIRNAME
     return ResolvedRoot(project=project, library=library)
 
 
@@ -552,6 +559,8 @@ __all__ = [
     "LAYOUT_VERSION",
     "LayoutError",
     "LayoutKind",
+    "LEGACY_LIBRARY_DIRNAMES",
+    "LIBRARY_DIRNAME",
     "MAX_COMPONENT_BYTES",
     "ResolvedRoot",
     "RunLayout",

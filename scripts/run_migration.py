@@ -13,7 +13,7 @@ import shutil
 from typing import Any, Iterable
 import uuid
 
-from scripts.run_layout import LayoutError, LayoutKind, RunLayout, portable_collision_key, safe_relpath, slugify_v1
+from scripts.run_layout import LayoutError, LayoutKind, LEGACY_LIBRARY_DIRNAMES, LIBRARY_DIRNAME, RunLayout, portable_collision_key, safe_relpath, slugify_v1
 from scripts.run_transactions import LeaseConflict, RunLease, TreeInventory
 
 
@@ -198,7 +198,12 @@ def discover_targets(path, *, destination_library=None) -> tuple[MigrationTarget
     except LayoutError:
         pass
     if not candidates:
-        libraries = [root] if root.name == "research" else [root / "research", root]
+        _lib_names = {LIBRARY_DIRNAME.casefold(), *(n.casefold() for n in LEGACY_LIBRARY_DIRNAMES)}
+        libraries = (
+            [root]
+            if root.name.casefold() in _lib_names
+            else [root / LIBRARY_DIRNAME, *(root / n for n in LEGACY_LIBRARY_DIRNAMES), root]
+        )
         for library in libraries:
             if not library.is_dir():
                 continue

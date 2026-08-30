@@ -21,8 +21,9 @@ There is ONE pipeline. No model fleet, no `mode` flag other than `slices`.
 
 Capture the directory where the skill was launched and prepare the run before any
 artifact is written. Normal results always live at
-`<project>/research/<run-slug>`. If the launch directory itself is named
-`research`, it is already the library and no second `research/` is added.
+`<project>/Deeper_Research/<run-slug>`. If the launch directory itself is named
+`Deeper_Research` (or the legacy `research`, still recognised), it is already the
+library and no second `Deeper_Research/` is added.
 
 ```bash
 python3 scripts/run_manager.py prepare \
@@ -45,7 +46,7 @@ Extracted source bytes always live under `Sources/Extracted/`; process artifacts
 never share that reader-facing source home.
 
 ```text
-<project>/research/<run-slug>/
+<project>/Deeper_Research/<run-slug>/
 ├── RESEARCH-BIBLE_<run-slug>.md
 ├── RESEARCH-BIBLE_<run-slug>.html
 ├── Sections/
@@ -70,7 +71,7 @@ python3 scripts/run_manager.py finalize \
   --broker-endpoint "$BROKER" --lease-token "$TOKEN" --json
 python3 scripts/run_manager.py lease release \
   --broker-endpoint "$BROKER" --lease-token "$TOKEN" --json
-python3 scripts/search.py index --root "$PROJECT/research"
+python3 scripts/search.py index --root "$PROJECT/Deeper_Research"
 ```
 
 The Markdown Bible is always retained. If compatible `jimemo` is installed it is
@@ -80,13 +81,14 @@ same automatic HTML companion for every user.
 ### Legacy migration and manual compatibility
 
 Migration is explicit but executes immediately by default. Point it at a legacy
-run, a `research` library, or a project; use `--dry-run` for a zero-write preview.
+run, a `Deeper_Research` (or legacy `research`) library, or a project; use
+`--dry-run` for a zero-write preview.
 
 ```bash
 python3 scripts/run_manager.py migrate "$PROJECT" --json
 python3 scripts/run_manager.py migrate "$PROJECT" --dry-run --json
-python3 scripts/run_manager.py migration-recover "$PROJECT/research" --mode continue
-python3 scripts/run_manager.py migration-recover "$PROJECT/research" --mode abort
+python3 scripts/run_manager.py migration-recover "$PROJECT/Deeper_Research" --mode continue
+python3 scripts/run_manager.py migration-recover "$PROJECT/Deeper_Research" --mode abort
 python3 scripts/run_manager.py rollback-migration "$RUN"
 ```
 
@@ -904,7 +906,7 @@ run directories. The default policy starts at two workers, adds one after each h
 60-second window, and caps at eight:
 
 ```bash
-cd /absolute/path/to/project/research
+cd /absolute/path/to/project/Deeper_Research
 python3 "$HOME/.agents/skills/deeper-research/scripts/batch_research.py" \
   questions.txt --adapter codex
 ```

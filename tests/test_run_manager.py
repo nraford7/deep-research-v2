@@ -33,7 +33,7 @@ def test_prepare_defaults_to_captured_project_research(tmp_path: Path, monkeypat
     result = prepare_run(question="Q", slug="topic")
     try:
         assert result.action == "created"
-        assert result.run_dir == tmp_path / "research" / "topic"
+        assert result.run_dir == tmp_path / "Deeper_Research" / "topic"
         assert (result.run_dir / "Process" / "run.json").exists()
         assert result.lease_keeper_pid
         assert result.broker_endpoint
@@ -43,7 +43,7 @@ def test_prepare_defaults_to_captured_project_research(tmp_path: Path, monkeypat
 
 
 def test_collision_without_mode_is_a_zero_write_result(tmp_path: Path) -> None:
-    library = tmp_path / "research"
+    library = tmp_path / "Deeper_Research"
     library.mkdir()
     create_skeleton_transaction(library, "topic", question="Q").publish()
     before = _snapshot(tmp_path)
@@ -54,7 +54,7 @@ def test_collision_without_mode_is_a_zero_write_result(tmp_path: Path) -> None:
 
 
 def test_cancel_is_a_clean_skip_with_no_writes(tmp_path: Path) -> None:
-    library = tmp_path / "research"
+    library = tmp_path / "Deeper_Research"
     library.mkdir()
     create_skeleton_transaction(library, "topic", question="Q").publish()
     before = _snapshot(tmp_path)
@@ -65,7 +65,7 @@ def test_cancel_is_a_clean_skip_with_no_writes(tmp_path: Path) -> None:
 
 
 def test_frozen_resume_is_rejected_but_fresh_gets_untouched_sibling(tmp_path: Path) -> None:
-    library = tmp_path / "research"
+    library = tmp_path / "Deeper_Research"
     library.mkdir()
     parent = create_skeleton_transaction(library, "topic", question="Q").publish()
     metadata_path = parent / "Process" / "run.json"
@@ -88,7 +88,7 @@ def test_frozen_resume_is_rejected_but_fresh_gets_untouched_sibling(tmp_path: Pa
 
 
 def test_corrupt_or_nonrun_collision_offers_only_fresh_and_cancel(tmp_path: Path) -> None:
-    library = tmp_path / "research"
+    library = tmp_path / "Deeper_Research"
     occupied = library / "topic"
     (occupied / "Process").mkdir(parents=True)
     (occupied / "Process" / "run.json").write_text("{", encoding="utf-8")
@@ -111,7 +111,7 @@ def test_dry_run_is_deterministic_and_performs_no_writes(tmp_path: Path) -> None
 
 
 def test_resume_returns_dependency_plan_and_live_broker(tmp_path: Path) -> None:
-    library = tmp_path / "research"
+    library = tmp_path / "Deeper_Research"
     library.mkdir()
     run = create_skeleton_transaction(library, "topic", question="Q").publish()
     (run / "Process" / "scope.json").write_text("scope", encoding="utf-8")
@@ -182,7 +182,7 @@ def test_broker_runs_allowlisted_mutating_helper_under_lease(tmp_path: Path) -> 
 
 
 def test_cli_mode_required_uses_stable_exit_code_and_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    library = tmp_path / "research"
+    library = tmp_path / "Deeper_Research"
     library.mkdir()
     create_skeleton_transaction(library, "topic", question="Q").publish()
     code = run_manager.run(
@@ -220,7 +220,7 @@ def test_short_lived_cli_hands_off_a_live_detached_broker(tmp_path: Path) -> Non
 
 
 def test_status_is_read_only(tmp_path: Path) -> None:
-    library = tmp_path / "research"
+    library = tmp_path / "Deeper_Research"
     library.mkdir()
     run = create_skeleton_transaction(library, "topic", question="Q").publish()
     before = _snapshot(tmp_path)

@@ -25,8 +25,8 @@ def fake_engine(monkeypatch):
 
 
 def _make_index(tmp_path):
-    """Create research/.semantic-index.db so _do_query reaches the engine call."""
-    r = tmp_path / "research"
+    """Create Deeper_Research/.semantic-index.db so _do_query reaches the engine call."""
+    r = tmp_path / "Deeper_Research"
     r.mkdir(exist_ok=True)
     (r / ".semantic-index.db").write_bytes(b"x")
     return r
@@ -38,8 +38,8 @@ def test_index_uses_bible_globs_and_research_root(fake_engine, tmp_path, monkeyp
     monkeypatch.chdir(tmp_path)
     assert w.run(["index"]) == 0
     assert fake_engine["index"]["in_patterns"] == ["*/README.md", "*/sections/*.md"]
-    assert fake_engine["index"]["root"] == (tmp_path / "research").resolve()
-    assert fake_engine["index"]["db_path"] == (tmp_path / "research").resolve() / ".semantic-index.db"
+    assert fake_engine["index"]["root"] == (tmp_path / "Deeper_Research").resolve()
+    assert fake_engine["index"]["db_path"] == (tmp_path / "Deeper_Research").resolve() / ".semantic-index.db"
     assert fake_engine["index"]["rebuild"] is False
 
 

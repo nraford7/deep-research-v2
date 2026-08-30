@@ -16,6 +16,7 @@ venv/
 .python-version
 
 # Research outputs (large, generated)
+Deeper_Research/
 research/
 round1/
 round2/

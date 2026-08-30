@@ -25,14 +25,15 @@ Output     Hub-and-spoke Research Bible (Markdown + self-contained HTML) + BibTe
 ## Project-local run layout
 
 New runs are created under the project that launched them:
-`<project>/research/<run-slug>/`. If a `research/` directory already exists, each
-run becomes a new subdirectory there. Existing slugs require an explicit choice:
+`<project>/Deeper_Research/<run-slug>/`. If a `Deeper_Research/` directory already
+exists (or a legacy `research/` one, still recognised), each run becomes a new
+subdirectory there. Existing slugs require an explicit choice:
 Resume, Extend, Start fresh, or Cancel. Extensions inherit the full source corpus
 and provenance into a new child; completed parents remain unchanged and partial
 parents are frozen.
 
 ```text
-research/<run-slug>/
+Deeper_Research/<run-slug>/
 ├── RESEARCH-BIBLE_<run-slug>.md
 ├── RESEARCH-BIBLE_<run-slug>.html
 ├── Sections/
@@ -288,7 +289,7 @@ Use the tested adaptive runner instead of hand-tuning a fixed shell fan-out. It 
 at two workers, adds one worker after each healthy 60-second window, and stops at eight:
 
 ```bash
-cd /absolute/path/to/project/research
+cd /absolute/path/to/project/Deeper_Research
 python3 "$HOME/.agents/skills/deeper-research/scripts/batch_research.py" \
   questions.txt --adapter codex
 ```

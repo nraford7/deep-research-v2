@@ -133,7 +133,7 @@ def test_project_dir_creates_project_local_v2_run(monkeypatch, capsys, tmp_path)
         env={"EXA_API_KEY": "exa-test-key"},
     )
     assert code is None
-    run_dir = tmp_path / "research" / "grid-battery"
+    run_dir = tmp_path / "Deeper_Research" / "grid-battery"
     assert (run_dir / "Process" / "run.json").is_file()
     out = capsys.readouterr().out
     assert "run_manager.py invoke-helper" in out
