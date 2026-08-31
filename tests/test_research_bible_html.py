@@ -309,7 +309,7 @@ def test_missing_or_failing_jimemo_uses_builtin_renderer(tmp_path, mode):
 
     assert result.renderer == "built-in"
     assert result.fallback_reason
-    assert "Research Bible" in output.read_text(encoding="utf-8")
+    assert "Research Report" in output.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("mode", ["info-list", "info-null-slots", "info-bytes", "render-bytes"])

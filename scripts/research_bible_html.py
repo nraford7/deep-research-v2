@@ -287,12 +287,19 @@ def build_document(
         name = path.name.casefold()
         if name == "dedup-decisions.md" or BIBLIOGRAPHY_FILE_RE.match(name):
             continue
+        # Skip prompt/meta artifacts (e.g. _SECTION_BRIEF.md, the shared per-section
+        # briefing) — underscore-prefixed files are never report content. Without this
+        # the "shared brief for all section subagents" block leaks into the export.
+        if name.startswith("_") or "shared-brief" in name or "shared brief" in name:
+            continue
         candidates.append(path)
     for path in sorted(candidates, key=_natural_key):
         source = path.read_text(encoding="utf-8", errors="replace")
         title, body = _drop_title_line(source)
         if not title:
             title = _strip_ordinal(path.stem.replace("_", " ").replace("-", " ").title())
+        if "shared brief for all section subagents" in title.casefold():
+            continue
         base_anchor = f"section-{_slugify(title)}"
         anchor = base_anchor
         suffix = 2
@@ -312,7 +319,7 @@ def build_document(
     default_title = sections_dir.parent.name.replace("_", " ").replace("-", " ").title()
 
     return ResearchDocument(
-        title=str(metadata.get("title") or default_title or "Research Bible"),
+        title=str(metadata.get("title") or default_title or "Research Report"),
         subtitle=str(metadata.get("subtitle") or ""),
         compiled=str(metadata.get("compiled") or ""),
         introduction=introduction,
@@ -459,14 +466,14 @@ def render_builtin_html(document: ResearchDocument, output_path: Path) -> None:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>{esc(document.title)} — Research Bible</title>
+<title>{esc(document.title)} — Research Report</title>
 <style>{_css_text()}</style>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to research</a>
 <header class="masthead">
-  <div class="masthead-rule"><span>Deeper research</span><span>Research Bible</span></div>
-  <div class="title-block"><p class="kicker">Research Bible</p><h1>{esc(document.title)}</h1>{subtitle}{date}</div>
+  <div class="masthead-rule"><span>Deeper research</span><span>Research Report</span></div>
+  <div class="title-block"><p class="kicker">Research Report</p><h1>{esc(document.title)}</h1>{subtitle}{date}</div>
   {provenance}
 </header>
 <main id="main">
@@ -509,7 +516,7 @@ def _jimemo_markdown(blocks: Sequence[ContentBlock]) -> str:
 def _jimemo_content(document: ResearchDocument) -> Dict[str, object]:
     content: Dict[str, object] = {
         "title": document.title,
-        "kicker": "Research Bible",
+        "kicker": "Research Report",
         "provenance": [
             {"label": label, "value": value} for label, value in document.provenance
         ],
