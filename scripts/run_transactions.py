@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -581,10 +582,9 @@ class _AlreadyAnswered(Exception):
 class BrokerStop(BrokerProtocolError):
     """The current request is answered with this error and then the broker EXITS:
     it can no longer vouch for the run (lease lost) or for its own worker (helper
-    past its deadline). With hard_exit=True a worker thread is still alive, so the
-    process ends immediately WITHOUT releasing the lease — the holder ages out via
-    the TTL instead, so no new owner can acquire while the abandoned worker could
-    still write; the daemon thread dies with the process."""
+    past its deadline). With hard_exit=True a helper tree may still be alive, so the
+    broker kills its isolated process group immediately WITHOUT releasing the lease.
+    The holder then ages out via the TTL, preventing takeover during termination."""
 
     def __init__(self, message: str, *, hard_exit: bool = False) -> None:
         super().__init__(message)
@@ -625,6 +625,26 @@ def _safe_str(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
+def _isolate_broker_process_group() -> None:
+    """Put the broker in its own POSIX process group before any helper runs.
+
+    Managed helper subprocesses inherit this group, so a hard stop can terminate
+    the broker, its worker thread, and every non-detaching descendant in one signal.
+    A managed helper must not create a new session/process group: doing so escapes
+    the broker's POSIX containment and invalidates the no-overlap guarantee.
+    Detached brokers already arrive as session leaders; multiprocessing-backed
+    brokers need to create their own session here.
+    """
+    if os.getpgrp() == os.getpid():
+        return
+    try:
+        os.setsid()
+    except OSError as exc:
+        raise BrokerProtocolError("broker could not isolate its process group") from exc
+    if os.getpgrp() != os.getpid():
+        raise BrokerProtocolError("broker could not isolate its process group")
+
+
 def _dispatch_keeping_lease_alive(dispatcher, validated, context, lease, ttl_seconds: float):
     """Run the (synchronous, minutes-long) helper in a worker thread while this
     thread renews the lease every ttl/3. Requests stay serialized — one helper at a
@@ -632,8 +652,10 @@ def _dispatch_keeping_lease_alive(dispatcher, validated, context, lease, ttl_sec
     (production TTL is 300 s; slice-search and full-text fetches run longer).
 
     Two ways this stops early, both raising BrokerStop(hard_exit=True) — answer if
-    the client is still there, then end the process immediately WITHOUT releasing
-    the lease (the holder ages out via the TTL), taking the daemon worker down:
+    the client is still there, then kill the broker's isolated process group without
+    releasing the lease (the holder ages out via the TTL), taking the worker and its
+    non-detaching subprocess descendants down. Managed helpers must not start a
+    new session or process group:
     - renewal fails (holder gone: suspend past the TTL, an audited takeover) — a new
       owner may already hold the run, so the worker must not keep writing;
     - the helper passes its deadline — a hung helper must not make the lease
@@ -693,6 +715,7 @@ def _broker_main(
     server: socket.socket | None = None
     socket_path: Path | None = None
     try:
+        _isolate_broker_process_group()
         lease = RunLease.acquire(
             library,
             key,
@@ -821,12 +844,13 @@ def _broker_main(
                         outcome = "ok" if response.get("ok") else f"error: {str(response.get('error', ''))[:120]}"
                         print(f"broker: client hung up before the reply for {action!s} could be delivered ({type(exc).__name__}); undelivered outcome = {outcome}; broker {'stopping' if not running else 'continues'}", file=sys.stderr)
                 if hard_exit:
-                    # A worker thread may still be alive: end the process NOW — whether
-                    # or not the reply could be delivered — without releasing the lease
-                    # (it ages out via the TTL), so no new owner can overlap a write the
-                    # abandoned worker might still make.
+                    # A worker thread and its subprocesses may still be alive. The
+                    # broker owns an isolated process group, so one uncatchable signal
+                    # stops the complete non-detaching helper tree before the retained
+                    # lease can age out and admit a new owner. Managed helpers are
+                    # required not to escape this group with setsid()/setpgid().
                     try:
-                        print("broker: hard exit with a live worker — lease left to expire", file=sys.stderr)
+                        print("broker: hard exit with a live helper tree — lease left to expire", file=sys.stderr)
                     except Exception:
                         pass
                     try:
@@ -835,7 +859,12 @@ def _broker_main(
                             socket_path.unlink()
                     except OSError:
                         pass
-                    os._exit(70)
+                    if os.getpgrp() == os.getpid():
+                        try:
+                            os.killpg(os.getpgrp(), signal.SIGKILL)
+                        except OSError:
+                            pass
+                    os._exit(70)  # safety fallback if process-group isolation failed
         try:
             lease.release(lease.owner.token)
         except LockError as exc:  # already gone (lease lost mid-helper) — nothing left to release

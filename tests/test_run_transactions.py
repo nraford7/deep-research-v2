@@ -5,6 +5,8 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import subprocess
+import sys
 import time
 
 import pytest
@@ -12,6 +14,7 @@ import pytest
 from scripts.run_layout import LayoutKind, RunLayout
 from scripts.run_transactions import (
     BrokerProtocolError,
+    BrokerStop,
     broker_request,
     ImmutableRegistry,
     Journal,
@@ -455,10 +458,40 @@ def _slow_marker_dispatch(request, context, lease):
     return {"ok": True}
 
 
+def _descendant_writer_dispatch(request, context, lease):
+    """Stand in for a helper that has launched a subprocess before hanging."""
+    ready = Path(context["descendant_ready"])
+    release = Path(context["release_descendant"])
+    code = (
+        "import os,pathlib,time; "
+        f"ready=pathlib.Path({str(ready)!r}); release=pathlib.Path({str(release)!r}); "
+        "ready.write_text(str(os.getpid())); "
+        "\nwhile not release.exists(): time.sleep(0.01); "
+        f"\npathlib.Path({context['marker']!r}).write_text('descendant wrote')"
+    )
+    subprocess.Popen([sys.executable, "-c", code])
+    _wait_for(ready)
+    Path(context["started"]).write_text("dispatch entered")
+    time.sleep(5.0)
+    return {"ok": True}
+
+
 def _wait_for(path: Path, timeout: float = 5.0) -> None:
     deadline = time.time() + timeout
     while not path.exists():
         assert time.time() < deadline, f"{path} never appeared"
+        time.sleep(0.02)
+
+
+def _wait_for_process_exit(pid: int, timeout: float = 5.0) -> None:
+    """Wait until ``pid`` no longer exists; fail instead of relying on a sleep."""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        assert time.time() < deadline, f"descendant process {pid} survived the broker hard stop"
         time.sleep(0.02)
 
 
@@ -518,6 +551,44 @@ def test_hung_helper_hits_the_deadline_and_the_broker_stops(tmp_path: Path) -> N
             broker_request(broker.socket_path, broker.owner.token, "invoke-helper", helper_id="scope", args={"question": "Q"})
         broker.process.join(timeout=3)
         assert not broker.process.is_alive(), "a broker whose helper hung must not stay immortal"
+    finally:
+        if broker.process.is_alive():
+            broker.process.terminate()
+
+
+def test_helper_deadline_kills_descendant_processes(tmp_path: Path) -> None:
+    """A hard broker stop must kill subprocesses spawned by the helper too.
+
+    Otherwise the retained lease merely delays an orphaned writer: once its TTL
+    ages out, that descendant can overlap the next owner of the run.
+    """
+    started = tmp_path / "started"
+    marker = tmp_path / "marker"
+    descendant_ready = tmp_path / "descendant-ready"
+    release_descendant = tmp_path / "release-descendant"
+    broker = _broker(
+        tmp_path,
+        "_descendant_writer_dispatch",
+        ttl_seconds=5,
+        context={
+            "started": str(started),
+            "marker": str(marker),
+            "descendant_ready": str(descendant_ready),
+            "release_descendant": str(release_descendant),
+            "helper_deadline_seconds": "2.0",
+        },
+    )
+    try:
+        with pytest.raises(BrokerStop, match="deadline"):
+            broker.request("invoke-helper", helper_id="scope", args={"question": "Q"})
+        _wait_for(started)
+        assert descendant_ready.exists(), "the test descendant never started"
+        descendant_pid = int(descendant_ready.read_text())
+        broker.process.join(timeout=3)
+        assert not broker.process.is_alive(), "broker did not stop at the helper deadline"
+        _wait_for_process_exit(descendant_pid)
+        release_descendant.write_text("go")
+        assert not marker.exists(), "a descendant kept running after the broker hard-stopped"
     finally:
         if broker.process.is_alive():
             broker.process.terminate()
