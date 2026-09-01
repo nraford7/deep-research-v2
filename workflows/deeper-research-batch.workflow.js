@@ -30,14 +30,22 @@
 //     in an in-sentence citation and use NO editorial fences; the adversary stage
 //     then loops verify+lint→remediate until lint_background exits 0.
 //
-// STILL TO CONFIRM ON THE LIVE SMOKE (marked // SMOKE):
-//   • whether coverage_audit (squad) is run as a stage or folded in
-//   • exact scope.json sibling-markdown side effects
+// v4 — structured RESEARCH-GUIDE briefs (AUGMENT, never replace):
+//   • accepts args.guideFile (a RESEARCH-GUIDE-*.md parsed into per-sprint briefs) OR a
+//     structured args.questions with optional {subQuestions, searchQueries, keyAuthors,
+//     disconfirm} per item; optional args.only=['ch3-q1',...] runs a subset
+//   • seeds add EXTRA retrieval slices ON TOP of the default broad neural retrieval — they
+//     never restrict it to only the named authors (guards against priors-laundering)
+//   • sub-questions are a COVERAGE CHECK that augments the pipeline's OWN corpus-grounded
+//     question-generation; they do not replace it
+//   • the disconfirming case is actively hunted (the "try to break the convergence" method)
+//
+// Verified on a 1-question smoke (ai-student-learning-styles, 28k words, guards clean).
 // ============================================================================
 
 export const meta = {
   name: 'deeper-research-batch',
-  description: 'Run brief questions through the legacy deeper-research pipeline in parallel, each producing a Source (md+html)',
+  description: 'Run a RESEARCH-GUIDE (or question list) through the legacy deeper-research pipeline in parallel; brief seeds augment retrieval + hunt the disconfirming case; each sprint yields a Source (md+html)',
   phases: [
     { title: 'Retrieve' },     // scope→slice→gate→fetch→chase (+ position scaffold)
     { title: 'Synthesize' },   // synthesis.md (exact headers) → deepen
@@ -53,7 +61,11 @@ export const meta = {
 //   args = {
 //     project:   '/abs/path/to/your/project',       // REQUIRED — runs land in <project>/research/<slug>/
 //     repo:      '/abs/path/to/deeper-research',     // REQUIRED — checkout holding scripts/ + config.py + llm.py
-//     questions: [{ slug:'ch7-q1-topic', question:'full text' }, ...],   // REQUIRED
+//     // ONE of the next two is REQUIRED:
+//     guideFile: '/abs/path/to/RESEARCH-GUIDE-chN.md',  // parse each sprint into a structured brief, OR
+//     questions: [{ slug:'ch7-q1-topic', question:'full text',   // ...pass them directly:
+//                   subQuestions?:[...], searchQueries?:[...], keyAuthors?:[...], disconfirm?:'...' }, ...],
+//     only:      ['ch3-q1','ch3-q3'],                // optional — run only these slugs (full or chN-qN prefix)
 //     cfg:       '~/.config/deeper-research/config.toml',   // optional — provider config for the adversary
 //     cap:       '1.50',                             // optional — per-run Exa retrieval cap (USD)
 //     retrievalConcurrency: 3,                        // optional — max Exa-hitting runs at once (default 3; "chunks of N")
@@ -86,10 +98,40 @@ function makeGate(max) {
 const exaGate = makeGate(EXA_MAX)
 const withExa = (fn) => exaGate.acquire().then(fn).finally(exaGate.release)
 
+// ---- Resolve the brief list: explicit args.questions, or parse a RESEARCH-GUIDE file ----
+const BRIEFS = { type:'object', required:['briefs'], properties:{ briefs:{ type:'array', items:{
+  type:'object', required:['slug','question'], properties:{
+    slug:{ type:'string' }, question:{ type:'string' },
+    subQuestions:{ type:'array', items:{ type:'string' } },
+    searchQueries:{ type:'array', items:{ type:'string' } },
+    keyAuthors:{ type:'array', items:{ type:'string' } },
+    disconfirm:{ type:'string' } } } } }}
+
 let QUESTIONS = cfg.questions
 if (typeof QUESTIONS === 'string') { QUESTIONS = JSON.parse(QUESTIONS) }
+if (!QUESTIONS && cfg.guideFile) {
+  log(`Parsing RESEARCH-GUIDE → briefs: ${cfg.guideFile}`)
+  const parsed = await agent(
+    `Read the RESEARCH-GUIDE markdown at ${cfg.guideFile}. It holds multiple research "sprints", each a
+     section headed like "## ch3-q1 — Sport and performance psychology". For EACH sprint extract:
+       slug          = the 'chN-qN' id joined to a kebab of the title (a-z0-9 + hyphens only), e.g. 'ch3-q1-sport-performance-psychology'
+       question      = ONE concise retrieval topic built from the Scope/remit + core question (NOT the whole section)
+       subQuestions  = the numbered "Research questions" list, verbatim, as an array of strings
+       searchQueries = the "Search queries" bullet seeds, as an array of strings
+       keyAuthors    = the "Key authors & works" entries, as an array of strings (author + work + what to pull)
+       disconfirm    = the "⚔ Convergence hook" DISCONFIRMING CASE to hunt — the counter-evidence sentence — as one string
+     Ignore any "already covered / do NOT re-commission" table. Return {briefs:[...]}.`,
+    { label: 'parse-guide', phase: 'Retrieve', schema: BRIEFS }
+  )
+  QUESTIONS = parsed ? parsed.briefs : null
+}
 if (!Array.isArray(QUESTIONS) || QUESTIONS.length === 0) {
-  throw new Error('args.questions must be a non-empty array of {slug, question}')
+  throw new Error('provide args.questions [{slug,question,...}] OR args.guideFile (a RESEARCH-GUIDE to parse)')
+}
+// Optional: run only a subset (match the full slug or its chN-qN prefix).
+if (Array.isArray(cfg.only) && cfg.only.length) {
+  QUESTIONS = QUESTIONS.filter(q => cfg.only.some(o => q.slug === o || q.slug.startsWith(o)))
+  if (!QUESTIONS.length) throw new Error(`args.only matched no slugs: ${JSON.stringify(cfg.only)}`)
 }
 // Slug guard: only [a-z0-9-], 3..80 chars — slugs become writable paths + shell args.
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
@@ -103,6 +145,41 @@ const slugs = QUESTIONS.map(q => q.slug)
 if (new Set(slugs).size !== slugs.length) throw new Error('duplicate slugs in brief')
 
 const runDirOf = (q) => `${PROJECT}/research/${q.slug}`
+
+// ---- Structured-brief fields (optional; AUGMENT retrieval + question-gen, never replace) ----
+const arr = (x) => Array.isArray(x) ? x.filter(v => typeof v === 'string' && v.trim()) : []
+const disconfirmOf = (q) => (typeof q.disconfirm === 'string' ? q.disconfirm.trim() : '')
+
+// Extra ADDITIVE retrieval slices from the brief's seeds (on top of default broad retrieval).
+function seedSliceInstr(q) {
+  const sq = arr(q.searchQueries), ka = arr(q.keyAuthors), dc = disconfirmOf(q)
+  if (!sq.length && !ka.length && !dc) return ''
+  const lines = (label, xs) => xs.map((s, i) => `\n             - ${label}${i + 1}: --query ${JSON.stringify(s)}`).join('')
+  return `
+       2b. WIDEN retrieval with the brief's seeds. These are ADDITIVE slices ON TOP of the broad topic
+           retrieval in step 2 (which already finds sources the brief never named). Do NOT restrict
+           retrieval to only these — they pull primaries + counter-evidence the neural search may miss.
+           For each seed run (slice_search prepends 'gap_'; it is ledger-capped at ${CAP} and fails open, so it self-bounds):
+             python3 scripts/slice_search.py --run-dir ${runDirOf(q)} --topic "${q.question}" --add-slice <name> --query "<query>" --max-retrieval-usd ${CAP}
+           Search-query seeds:${sq.length ? lines('seed', sq) : ' (none)'}
+           Key authors/works — pull the PRIMARY in the author's own words:${ka.length ? lines('author', ka) : ' (none)'}${dc ? `\n           Disconfirming case — seed a slice to FIND counter-evidence (NOT to confirm the thesis):\n             - disconfirm: --query ${JSON.stringify(dc)}` : ''}`
+}
+
+// Synthesis augmentation: sub-questions as a coverage CHECK + the disconfirming case as must-hunt.
+function coverageInstr(q) {
+  const sq = arr(q.subQuestions), dc = disconfirmOf(q)
+  let s = ''
+  if (sq.length) s += `
+       COVERAGE CHECK (augment — do NOT replace your own analysis): the brief poses these angles. Ensure
+       the corpus's answer to each is reflected IF the evidence supports it; do NOT force an answer the
+       corpus doesn't support. Your OWN Comparison/Surprises/Openings + the New/Root-Cause/Consequence
+       questions stay PRIMARY and must come from the CORPUS, not the brief:${sq.map((x, i) => `\n           ${i + 1}. ${x}`).join('')}`
+  if (dc) s += `
+       MUST-HUNT — disconfirming case: ${dc}
+       Actively test whether it BREAKS the convergence. A domain that breaks it is a FINDING, not a failure —
+       create a position for it so Stage 3 writes up the strongest counter-evidence, even if it undercuts the thesis.`
+  return s
+}
 
 // Short-circuit ONLY on real failure sentinels — never on an agent's chatty note.
 // (v3.1: a synthesis agent wrote a success narrative into `note`, which the old
@@ -141,7 +218,7 @@ const results = await pipeline(
      From ${REPO}, run in order (these flags are verified):
        1. python3 scripts/scope.py --topic "${q.question}" --output ${runDirOf(q)}/scope.json   (creates the run dir + scope.json)
        2. python3 scripts/slice_search.py --run-dir ${runDirOf(q)} --topic "${q.question}" --max-retrieval-usd ${CAP}
-          → if it prints 402 NO_MORE_CREDITS, return note='exa-credits' and STOP (do NOT retry).
+          → if it prints 402 NO_MORE_CREDITS, return note='exa-credits' and STOP (do NOT retry).${seedSliceInstr(q)}
        3. python3 scripts/fetch_fulltext.py --run-dir ${runDirOf(q)}
        4. python3 scripts/evidence_gate.py --run-dir ${runDirOf(q)}
           → exit 22 = gate failed: return note='gate-failed' and STOP.
@@ -165,7 +242,7 @@ const results = await pipeline(
             ## New Questions
             ## Root Cause Questions
             ## Consequence Questions
-          Include ONE near-top "field map" section (mainstream vs heterodox; settled vs contested).
+          Include ONE near-top "field map" section (mainstream vs heterodox; settled vs contested).${coverageInstr(q)}
        3. python3 scripts/deepen_questions.py --run-dir ${runDirOf(q)} --round2-file ${runDirOf(q)}/round2/synthesis.md --max-retrieval-usd ${CAP}
           (Exa deep-reasoning; partial answers are fine — do NOT require N/N. 402 = skip, non-fatal.)
        Confirm or adjust the ${r.positions.length} positions from the synthesis.
@@ -186,7 +263,7 @@ const results = await pipeline(
          Position: ${p.title}  →  write to ${file}
          Read the assigned full-texts under ${runDirOf(q)}/round1/sources/ (and round2_5/ deepening answers).
          House style: "# Title", then "## The claim / ## The argument / ## The strongest objection, and the reply / ## How it differs from its rivals". 2.5-4k words.
-         Cite [domain.tld, YYYY] or [Author, YYYY].
+         Cite [domain.tld, YYYY] or [Author, YYYY].${disconfirmOf(q) ? `\n         DISCONFIRM: this run hunts a counter-case — "${disconfirmOf(q)}". If your position bears on it, give the counter-evidence full weight; do not soften it to protect the thesis.` : ''}
          TWO HARD RULES (reader-facing prose must be clean):
            (a) NO PIPELINE TOKENS in prose. A deepening answer (round2_5/answer_NN_*.md) is an INDEX into the
                primary sources it used — open it, find the primary source, and cite THAT. Never write
