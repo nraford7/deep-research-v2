@@ -45,6 +45,23 @@ def test_pdf_to_text_roundtrip():
     assert ff._pdf_to_text(b"not a pdf") == ""
 
 
+def test_pdf_to_text_survives_malformed_pages_tree(monkeypatch):
+    """A PDF whose /Pages tree is broken raises from `reader.pages` itself, outside
+    the per-page try — one such PDF used to kill the whole full-text pass."""
+    pypdf = pytest.importorskip("pypdf")
+
+    class _BrokenReader:
+        def __init__(self, _stream):
+            pass
+
+        @property
+        def pages(self):
+            raise pypdf.errors.PdfReadError("broken pages tree")
+
+    monkeypatch.setattr(pypdf, "PdfReader", _BrokenReader)
+    assert ff._pdf_to_text(b"%PDF-1.4 whatever") == ""
+
+
 # --- process_run wiring -----------------------------------------------------
 
 def _write_slice(run_dir, name, rows):

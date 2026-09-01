@@ -120,11 +120,14 @@ def _pdf_to_text(data: bytes) -> str:
         print(f"  ⚠ PDF parse failed ({type(exc).__name__})", file=sys.stderr)
         return ""
     out = []
-    for page in reader.pages:
-        try:
-            out.append(page.extract_text() or "")
-        except Exception:  # noqa: BLE001 — one bad page never sinks the doc
-            continue
+    try:
+        for page in reader.pages:
+            try:
+                out.append(page.extract_text() or "")
+            except Exception:  # noqa: BLE001 — one bad page never sinks the doc
+                continue
+    except Exception as exc:  # noqa: BLE001 — the pages tree itself can be malformed
+        print(f"  ⚠ PDF pages unreadable ({type(exc).__name__})", file=sys.stderr)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
 
 
