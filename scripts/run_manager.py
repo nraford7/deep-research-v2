@@ -48,6 +48,7 @@ from scripts.run_transactions import (
     BrokerProtocolError,
     LeaseConflict,
     LocalBrokerClient,
+    BrokerStop,
     RecoveryOutcome,
     RunLease,
     TransactionConflict,
@@ -605,6 +606,11 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--broker-endpoint", required=True)
         command.add_argument("--lease-token", required=True)
         command.add_argument("--json", action="store_true")
+        command.add_argument("--reply-timeout", type=float, default=None,
+                             help="seconds to wait for the broker's reply (default: run_transactions.BROKER_REPLY_TIMEOUT, "
+                                  "the broker's helper deadline + 300 s). Raise it when another long helper may be queued "
+                                  "ahead of this one or when the broker's helper deadline was raised — a client that quits "
+                                  "before the broker does retries into a second dispatch")
         if name == "invoke-helper":
             command.add_argument("--helper", required=True)
             command.add_argument("--args-json", default="{}")
@@ -721,10 +727,12 @@ def run(argv: Sequence[str] | None = None) -> int:
             payload = {"options": json.loads(arguments.options_json)}
         elif arguments.command == "mark-failed":
             payload = {"reason": arguments.reason}
+        timeout_kw = {"reply_timeout": arguments.reply_timeout} if getattr(arguments, "reply_timeout", None) is not None else {}
         result = broker_request(
             arguments.broker_endpoint,
             arguments.lease_token,
             arguments.command,
+            **timeout_kw,
             **payload,
         )
         _emit(result)
@@ -732,6 +740,11 @@ def run(argv: Sequence[str] | None = None) -> int:
     except ManagerError as exc:
         _emit({"error": str(exc), "exit": int(exc.exit_code), **exc.details})
         return int(exc.exit_code)
+    except BrokerStop as exc:
+        # the broker stopped (lease lost, helper deadline): the run may be in an
+        # ambiguous state — distinct from a validation rejection
+        _emit({"error": str(exc), "exit": int(Exit.FAILED), "broker_stopped": True})
+        return int(Exit.FAILED)
     except (ValueError, json.JSONDecodeError, LayoutError, LifecycleError, BrokerProtocolError) as exc:
         _emit({"error": str(exc), "exit": int(Exit.INVALID_ARGUMENT)})
         return int(Exit.INVALID_ARGUMENT)

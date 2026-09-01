@@ -11,7 +11,9 @@ import fcntl
 import hashlib
 import importlib
 import json
+import math
 import multiprocessing
+import threading
 from multiprocessing import process as multiprocessing_process
 import os
 from pathlib import Path
@@ -572,6 +574,107 @@ def _process_start_identity(pid: int) -> str | None:
         return None
 
 
+class _AlreadyAnswered(Exception):
+    """Control flow: the request was rejected before dispatch; only the reply is owed."""
+
+
+class BrokerStop(BrokerProtocolError):
+    """The current request is answered with this error and then the broker EXITS:
+    it can no longer vouch for the run (lease lost) or for its own worker (helper
+    past its deadline). With hard_exit=True a worker thread is still alive, so the
+    process ends immediately WITHOUT releasing the lease — the holder ages out via
+    the TTL instead, so no new owner can acquire while the abandoned worker could
+    still write; the daemon thread dies with the process."""
+
+    def __init__(self, message: str, *, hard_exit: bool = False) -> None:
+        super().__init__(message)
+        self.hard_exit = hard_exit
+
+
+# A helper that never returns must not make the broker (and its lease) immortal.
+# Per-run override: context["helper_deadline_seconds"] (finite, > 0; else default).
+BROKER_HELPER_DEADLINE: float = 7200.0
+# Total time a client gets to deliver one framed request. The per-recv timeout is
+# an inactivity timeout, so without this a one-byte-every-few-seconds client could
+# hold the (single-threaded, not-yet-authenticated) request loop past the TTL.
+# Per-run override: context["request_deadline_seconds"].
+BROKER_REQUEST_DEADLINE: float = 10.0
+
+
+def _positive_finite(value: Any, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) and number > 0 else default
+
+
+def _helper_deadline(context: Mapping[str, Any]) -> float:
+    return _positive_finite(context.get("helper_deadline_seconds"), BROKER_HELPER_DEADLINE)
+
+
+def _request_deadline(context: Mapping[str, Any]) -> float:
+    return _positive_finite(context.get("request_deadline_seconds"), BROKER_REQUEST_DEADLINE)
+
+
+def _safe_str(exc: BaseException) -> str:
+    try:
+        text = str(exc)
+    except BaseException:  # a __str__ that raises ANYTHING must not escape a failure path
+        text = ""
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _dispatch_keeping_lease_alive(dispatcher, validated, context, lease, ttl_seconds: float):
+    """Run the (synchronous, minutes-long) helper in a worker thread while this
+    thread renews the lease every ttl/3. Requests stay serialized — one helper at a
+    time — but the holder no longer expires under a helper that outlives the TTL
+    (production TTL is 300 s; slice-search and full-text fetches run longer).
+
+    Two ways this stops early, both raising BrokerStop(hard_exit=True) — answer if
+    the client is still there, then end the process immediately WITHOUT releasing
+    the lease (the holder ages out via the TTL), taking the daemon worker down:
+    - renewal fails (holder gone: suspend past the TTL, an audited takeover) — a new
+      owner may already hold the run, so the worker must not keep writing;
+    - the helper passes its deadline — a hung helper must not make the lease
+      immortal."""
+    box: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            box["result"] = dispatcher(validated, context, lease)
+        except BaseException as exc:  # re-raised on the broker thread below
+            box["error"] = exc
+
+    deadline = _helper_deadline(context)
+    worker = threading.Thread(target=_run, name="broker-helper", daemon=True)
+    started = time.monotonic()
+    worker.start()
+    renew_every = max(0.01, ttl_seconds / 3)   # stays below any accepted TTL
+    while worker.is_alive():
+        # poll no later than the deadline itself, so a small deadline is not
+        # stretched to the next ttl/3 tick
+        remaining = deadline - (time.monotonic() - started)
+        worker.join(timeout=max(0.01, min(renew_every, remaining)))
+        if not worker.is_alive():
+            break
+        if time.monotonic() - started > deadline:
+            raise BrokerStop(
+                f"helper {validated.get('helper_id', validated.get('action'))!s} passed its {deadline:g}s deadline"
+                " — broker stopping without releasing", hard_exit=True)
+        try:
+            lease.renew(lease.owner.token, ttl_seconds=ttl_seconds)
+        except Exception as exc:
+            # The holder is gone (suspend past the TTL, an audited takeover): a new
+            # owner may already be writing. Exclusivity beats a clean finish — stop
+            # NOW and take the worker down with the process; never drain it.
+            raise BrokerStop(f"lease lost while the helper ran ({_safe_str(exc)}) — broker stopping at once", hard_exit=True)
+    if "error" in box:
+        # Whatever the helper raised (any BaseException) is THIS request's failure.
+        raise BrokerProtocolError(_safe_str(box["error"]))
+    return box.get("result")
+
+
 def _broker_main(
     connection: Any,
     library: str,
@@ -628,16 +731,46 @@ def _broker_main(
                     break
                 continue
             with client:
-                client.settimeout(5)
+                # Everything about ONE client connection is contained here. A client
+                # that times out and hangs up (helpers run for minutes; the CLI used
+                # to give them 5 s) makes the reply write fail with EPIPE/ECONNRESET —
+                # that is the client's loss, never a reason for the broker to die.
+                # 2026-09-01: exactly that write escaped to the fatal handler below,
+                # unlinked the socket and released the lease mid-run ("keeper died").
                 received = bytearray()
-                while b"\n" not in received:
-                    chunk = client.recv(65536)
-                    if not chunk:
-                        break
-                    received.extend(chunk)
-                    if len(received) > 1024 * 1024:
-                        raise BrokerProtocolError("broker request exceeds one MiB")
+                request: Any = None
+                response: dict[str, Any] | None = None
+                hard_exit = False
+                request_deadline = time.monotonic() + _request_deadline(context)
                 try:
+                    while b"\n" not in received:
+                        remaining = request_deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise BrokerProtocolError("request not delivered within the broker request deadline")
+                        client.settimeout(min(5.0, remaining))
+                        chunk = client.recv(65536)
+                        if not chunk:
+                            break
+                        received.extend(chunk)
+                        if len(received) > 1024 * 1024:
+                            raise BrokerProtocolError("broker request exceeds one MiB")
+                except OSError as exc:  # includes socket.timeout on a silent client
+                    if time.monotonic() >= request_deadline:
+                        # the inactivity timeout fired right at the deadline: answer, don't just drop
+                        response = {"ok": False, "error": "request not delivered within the broker request deadline", "error_type": "BrokerProtocolError"}
+                    else:
+                        print(f"broker: dropped a client that sent no complete request ({type(exc).__name__}); continuing", file=sys.stderr)
+                        continue
+                except BrokerProtocolError as exc:
+                    response = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
+                if response is None and b"\n" not in received:
+                    # EOF before the newline frame: the client gave up mid-send. Never
+                    # dispatch an unframed request — a retry would duplicate a mutation
+                    # or metered API spend.
+                    response = {"ok": False, "error": "incomplete broker request (no newline terminator)", "error_type": "BrokerProtocolError"}
+                try:
+                    if response is not None:
+                        raise _AlreadyAnswered()
                     request = json.loads(bytes(received).split(b"\n", 1)[0].decode("utf-8"))
                     validated = validate_broker_request(request, allowed_helpers=allowed_helpers)
                     if validated["token"] != lease.owner.token:
@@ -646,21 +779,72 @@ def _broker_main(
                         response = {"ok": True, "result": {"released": True}}
                         running = False
                     else:
-                        lease.renew(lease.owner.token, ttl_seconds=ttl_seconds)
-                        result = (
-                            {"renewed_until": lease.owner.renewed_until}
-                            if validated["action"] == "renew"
-                            else dispatcher(validated, context, lease)
-                        )
+                        try:
+                            lease.renew(lease.owner.token, ttl_seconds=ttl_seconds)
+                        except Exception as exc:
+                            # no worker is running yet, so a normal stop is enough:
+                            # answer, leave the loop, release what (if anything) is ours
+                            raise BrokerStop(f"lease lost before dispatch ({_safe_str(exc)}) — broker stopping")
+                        if validated["action"] == "renew":
+                            result = {"renewed_until": lease.owner.renewed_until}
+                        else:
+                            result = _dispatch_keeping_lease_alive(dispatcher, validated, context, lease, ttl_seconds)
                         response = {"ok": True, "result": result}
                         if validated["action"] == "finalize":
                             running = False
-                except Exception as exc:
-                    response = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
-                client.sendall((json.dumps(response, sort_keys=True) + "\n").encode("utf-8"))
-        lease.release(lease.owner.token)
+                except _AlreadyAnswered:
+                    pass
+                except BrokerStop as exc:
+                    response = {"ok": False, "error": str(exc), "error_type": "BrokerStop"}
+                    running = False
+                    hard_exit = exc.hard_exit
+                except (Exception, SystemExit) as exc:
+                    # SystemExit: a helper's argparse rejecting a value exits(2) —
+                    # that is the request's failure, not the broker's. (Worker-thread
+                    # exceptions of ANY kind arrive here already wrapped.)
+                    response = {"ok": False, "error": _safe_str(exc), "error_type": type(exc).__name__}
+                try:
+                    # default=str: a helper returning a Path/set/dataclass field must
+                    # not turn a finished job into a dead broker. Any other failure to
+                    # serialize (a __str__ that raises, RecursionError on a pathological
+                    # result) is this request's error, never the broker's.
+                    encoded = (json.dumps(response, sort_keys=True, default=str) + "\n").encode("utf-8")
+                except BaseException as exc:  # a __str__ raising SystemExit is still this request's problem
+                    encoded = (json.dumps({"ok": False, "error": f"unserializable broker response: {_safe_str(exc)}", "error_type": "TypeError"}) + "\n").encode("utf-8")
+                try:
+                    client.sendall(encoded)
+                except OSError as exc:
+                    if not hard_exit:
+                        # Only the reply was lost; whatever this request did (or failed
+                        # to do) is recorded in the response we could not deliver.
+                        action = request.get("action", "?") if isinstance(request, dict) else "?"
+                        outcome = "ok" if response.get("ok") else f"error: {str(response.get('error', ''))[:120]}"
+                        print(f"broker: client hung up before the reply for {action!s} could be delivered ({type(exc).__name__}); undelivered outcome = {outcome}; broker {'stopping' if not running else 'continues'}", file=sys.stderr)
+                if hard_exit:
+                    # A worker thread may still be alive: end the process NOW — whether
+                    # or not the reply could be delivered — without releasing the lease
+                    # (it ages out via the TTL), so no new owner can overlap a write the
+                    # abandoned worker might still make.
+                    try:
+                        print("broker: hard exit with a live worker — lease left to expire", file=sys.stderr)
+                    except Exception:
+                        pass
+                    try:
+                        server.close()
+                        if socket_path is not None:
+                            socket_path.unlink()
+                    except OSError:
+                        pass
+                    os._exit(70)
+        try:
+            lease.release(lease.owner.token)
+        except LockError as exc:  # already gone (lease lost mid-helper) — nothing left to release
+            print(f"broker: lease not released on exit ({exc})", file=sys.stderr)
         lease = None
     except BaseException as exc:
+        # Fatal: say why in the broker log (stderr) — a silent death is what made
+        # the 2026-09-01 keeper deaths look like a mystery.
+        print(f"broker: exiting on {type(exc).__name__}: {exc}", file=sys.stderr)
         try:
             connection.send({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
         except Exception:
@@ -705,18 +889,46 @@ class LocalBrokerClient:
             raise BrokerProtocolError("broker did not stop after authenticated release")
 
 
+# Connecting to and writing into the broker socket is local and instantaneous —
+# 5 s is generous. WAITING for the reply is not: invoke-helper runs Exa slices,
+# full-text fetches and citation chases that legitimately take minutes, so the
+# reply wait defaults to the broker's helper deadline + 300 s (a stuck helper
+# still surfaces as a timeout rather than a hung CLI) and is settable per call
+# (reply_timeout; None blocks). The default assumes the usual shape — one
+# orchestrator issuing helpers one at a time; a request queued behind another
+# long helper counts its wait from send, so concurrent clients should pass a
+# larger reply_timeout or serialize.
+# Until 2026-09-01 a single 5 s timeout covered both, so every long helper
+# "timed out" client-side while its work completed server-side.
+BROKER_CONNECT_TIMEOUT: float = 5.0
+BROKER_REPLY_TIMEOUT: float | None = BROKER_HELPER_DEADLINE + 300.0  # outlast the broker's own give-up point: a client that quits first would retry into a duplicate dispatch
+_USE_DEFAULT = object()
+
+
 def broker_request(
     endpoint: os.PathLike[str] | str,
     token: str,
     action: str,
+    *,
+    reply_timeout: float | None | object = _USE_DEFAULT,
     **payload: Any,
 ) -> Any:
+    if reply_timeout is _USE_DEFAULT:
+        reply_timeout = BROKER_REPLY_TIMEOUT
+    if reply_timeout is not None:
+        # validate BEFORE anything is sent: a bad value must not become an
+        # ambiguous "request delivered, client errored" retry hazard
+        if isinstance(reply_timeout, bool) or not isinstance(reply_timeout, (int, float)):
+            raise ValueError(f"reply_timeout must be a number of seconds or None, not {reply_timeout!r}")
+        if not math.isfinite(reply_timeout) or reply_timeout < 0:
+            raise ValueError(f"reply_timeout must be finite and non-negative, not {reply_timeout!r}")
     request = {"action": action, "token": token, **payload}
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        client.settimeout(5)
+        client.settimeout(BROKER_CONNECT_TIMEOUT)
         client.connect(os.fspath(endpoint))
         client.sendall((json.dumps(request, sort_keys=True) + "\n").encode("utf-8"))
+        client.settimeout(reply_timeout)  # None = block until the helper answers
         received = bytearray()
         while b"\n" not in received:
             chunk = client.recv(65536)
@@ -727,7 +939,12 @@ def broker_request(
     finally:
         client.close()
     if not response.get("ok"):
-        raise BrokerProtocolError(response.get("error", "broker request failed"))
+        message = response.get("error", "broker request failed")
+        if response.get("error_type") == "BrokerStop":
+            # the broker answered and then STOPPED (lease lost / helper deadline):
+            # callers must not read this as an ordinary validation rejection
+            raise BrokerStop(message)
+        raise BrokerProtocolError(message)
     return response.get("result")
 
 
