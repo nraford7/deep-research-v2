@@ -22,6 +22,34 @@ Output     Hub-and-spoke Research Bible (Markdown + self-contained HTML) + BibTe
              + searchable semantic index spanning every topic in the project
 ```
 
+## Batch workflow (run many briefs in parallel)
+
+`workflows/deeper-research-batch.workflow.js` runs the whole pipeline for many questions at
+once, driven by Claude Code's Workflow tool. One orchestration script fans out over the
+questions **and** over each question's parallel section writers, so no leaf agent has to nest —
+which is what lets it run the full pipeline (a single flat subagent cannot, because the reasoning
+rounds are themselves parallel-subagent fan-outs).
+
+Point it at a `RESEARCH-GUIDE-*.md`, or pass questions inline:
+
+```js
+args = {
+  project: '/abs/path/to/project',            // runs land in <project>/research/<slug>/
+  repo:    '/abs/path/to/deeper-research',
+  guideFile: '/abs/path/to/RESEARCH-GUIDE.md',// parse each sprint into a brief, OR:
+  questions: [{ slug, question, subQuestions?, searchQueries?, keyAuthors?, disconfirm? }],
+  only: ['ch3-q1'],                           // optional — run a subset
+  retrievalConcurrency: 3,                    // optional — throttle only the Exa-hitting stages
+}
+```
+
+Each sprint yields a Source (Markdown + HTML). Brief seeds **augment** the pipeline, never
+replace it: `searchQueries` and `keyAuthors` add extra retrieval slices *on top of* the default
+broad neural retrieval (never restricting it to only the named sources); `subQuestions` are a
+coverage check over the pipeline's own corpus-grounded question generation; the `disconfirm`
+case is actively hunted. Only the Exa-hitting stages are throttled (default 3 concurrent) so a
+shared Exa account can't exhaust its credits mid-batch. A bare `{ slug, question }` also works.
+
 ## Project-local run layout
 
 New runs are created under the project that launched them:
