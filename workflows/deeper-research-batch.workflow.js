@@ -56,6 +56,7 @@ export const meta = {
 //     questions: [{ slug:'ch7-q1-topic', question:'full text' }, ...],   // REQUIRED
 //     cfg:       '~/.config/deeper-research/config.toml',   // optional — provider config for the adversary
 //     cap:       '1.50',                             // optional — per-run Exa retrieval cap (USD)
+//     retrievalConcurrency: 3,                        // optional — max Exa-hitting runs at once (default 3; "chunks of N")
 //   }
 // (Every Bash stage also `source ~/.env` for EXA/OPENAI/XAI/etc keys — home-relative, not embedded here.)
 const cfg = (args && typeof args === 'object' && !Array.isArray(args)) ? args : { questions: args }
@@ -67,6 +68,23 @@ if (!PROJECT || !REPO) {
 const CFG = cfg.cfg || '~/.config/deeper-research/config.toml'   // expanded inside the agent's python
 const CAP = String(cfg.cap || '1.50')                            // per-run Exa retrieval cap, USD
 const ENV = `set -a; source ~/.env; set +a; export PYTHONPATH=${REPO}`
+
+// ---- Exa concurrency gate ("chunks of N") -----------------------------------
+// Only the retrieval + deepen stages hit the SHARED Exa account. Throttle THEM so
+// a wide fan-out can't 402 mid-batch, while the non-Exa stages (sections/adversary/
+// export) keep flowing. Default 3 → at most 3 Exa-hitting runs in flight at once.
+const EXA_MAX = Math.max(1, Number(cfg.retrievalConcurrency) || 3)
+function makeGate(max) {
+  let active = 0
+  const waiters = []
+  const acquire = () => (active < max ? (active++, Promise.resolve())
+                                      : new Promise(res => waiters.push(res)))
+  const release = () => { if (waiters.length) waiters.shift()()   // hand the slot to the next waiter
+                          else active-- }
+  return { acquire, release }
+}
+const exaGate = makeGate(EXA_MAX)
+const withExa = (fn) => exaGate.acquire().then(fn).finally(exaGate.release)
 
 let QUESTIONS = cfg.questions
 if (typeof QUESTIONS === 'string') { QUESTIONS = JSON.parse(QUESTIONS) }
@@ -107,16 +125,15 @@ const SECTION1  = { type:'object', required:['path','words'], properties:{
 const REPORT    = { type:'object', required:['reportPath','words','note'], properties:{
   reportPath:{type:'string'}, htmlPath:{type:'string'}, words:{type:'integer'}, note:{type:'string'} }}
 
-log(`Batch: ${QUESTIONS.length} questions → parallel pipelines`)
-// NOTE on load: pipeline() caps concurrent agents at ~min(16, cores-2). With 6
-// questions × ~9 section writers, retrieval calls to the SHARED Exa account can
-// still stack. If credits are tight, run the brief in 2-3 question chunks.
+log(`Batch: ${QUESTIONS.length} questions → parallel pipelines (Exa gate = ${EXA_MAX} concurrent)`)
+// Non-Exa stages still fan out under pipeline()'s ~min(16, cores-2) agent cap; only
+// the Exa-hitting stages are throttled by exaGate above.
 
 const results = await pipeline(
   QUESTIONS,
 
-  // ── STAGE 1 · RETRIEVE ────────────────────────────────────────────────────
-  (q) => agent(
+  // ── STAGE 1 · RETRIEVE (Exa-gated) ────────────────────────────────────────
+  (q) => withExa(() => agent(
     `RETRIEVAL stage, ONE question, LEGACY standalone flow. Do NOT run run_manager (no managed v2 run).
      Question: "${q.question}"
      Run dir: ${runDirOf(q)}
@@ -133,12 +150,12 @@ const results = await pipeline(
      Then read round1/brief_*.md + a sample of round1/sources/*.txt full-texts and propose 6-10 positions.
      Return {corpusCount, positions:[{slug,title}], note:''}`,
     { label: `retrieve:${q.slug}`, phase: 'Retrieve', schema: RETRIEVAL }
-  ),
+  )),
 
   // ── STAGE 2 · SYNTHESIZE ──────────────────────────────────────────────────
   (r, q) => {
     if (failed(r)) return r
-    return agent(
+    return withExa(() => agent(
       `SYNTHESIS stage for "${q.question}". Run dir ${runDirOf(q)}. Prefix Bash: ${ENV}
        1. Read the WHOLE Round-1 corpus (round1/slice_*.jsonl + brief_*.md + every round1/sources/*.txt with a text_path).
        2. Write research synthesis to ${runDirOf(q)}/round2/synthesis.md using these EXACT headers (deepen_questions parses them verbatim):
@@ -154,7 +171,7 @@ const results = await pipeline(
        Confirm or adjust the ${r.positions.length} positions from the synthesis.
        Return {corpusCount, positions, note:''}`,
       { label: `synth:${q.slug}`, phase: 'Synthesize', schema: RETRIEVAL }
-    )
+    ))
   },
 
   // ── STAGE 3 · SECTIONS ────────────────────────────────────────────────────
