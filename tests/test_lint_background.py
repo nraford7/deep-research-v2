@@ -162,3 +162,133 @@ def test_specific_trigger_labels():
     assert "spelled-out ordinal" in labels("the third wave")
     assert "spelled-out cardinal" in labels("twenty firms adopted it")
     assert "vague quantifier" in labels("several studies agree")
+
+
+def test_abbreviation_dots_do_not_split_a_cited_sentence():
+    """An abbreviation dot ("ca.", "inv.", "p.", "cf.", "e.g.") is not a sentence
+    boundary. Splitting there orphaned a cited quantity into a citation-free fragment
+    and produced a false violation (skeletons-japanese-art run, 2026-09-01)."""
+    assert _violations_in(
+        "It sold for $300 in 1893 per inv. records [Smith 2001].") == []
+    assert _violations_in(
+        "The panel is dated ca. 1720 by the museum, see p. 4 [Met 2019].") == []
+    assert _violations_in(
+        "Some 45 sheets survive, cf. the census of inv. nos. 12-57 (Tinsley, 2017).") == []
+    # An initial before a surname is not a boundary either.
+    assert _violations_in("The 1893 sale to J. Pierpont Morgan is documented [Smith 2001].") == []
+    # Real boundaries still split: the uncited number in the second sentence must fail.
+    assert _violations_in("Dated ca. 1720 [Met 2019]. Then 47 rivals rejected it.")
+
+
+def test_sentence_ending_abbreviation_still_splits_before_a_capitalised_sentence():
+    """'etc.' / 'et al.' end sentences as often as not: a capitalised next word is a
+    real boundary there, so the uncited 47 must not ride the next sentence's citation."""
+    assert _violations_in(
+        "There were 47 prints, drawings, etc. The attribution is accepted [Smith 2001].")
+    assert _violations_in(
+        "Some 47 sheets were catalogued by Kanda et al. The census is accepted [Kanda 2015].")
+    # ...but the same abbreviations followed by a lower-case or numeric continuation stay joined
+    assert _violations_in("Kanda et al. counted 47 sheets [Kanda 2015].") == []
+
+
+def test_dotted_initialisms_join_only_before_a_continuation():
+    """'U.S.', 'Ph.D.', 'Inc.' and initials end sentences as often as they introduce
+    the next word, so they join only before lower-case, a digit, or citation
+    punctuation. The price is a residual false positive ('47 works in U.S. Census
+    records [X]'), accepted so that 'in the U.S. The ... [X]' cannot launder 47."""
+    assert _violations_in("The 47 works appear in U.S. and Japanese collections [Smith 2001].") == []
+    assert _violations_in("Sold by Acme Inc. in 1893 for 47 dollars [Smith 2001].") == []
+    # a real boundary after an ambiguous abbreviation must still be caught
+    assert _violations_in("There were 47 branches in the U.S. The conclusion is documented [Smith 2001].")
+    assert _violations_in("Some 47 lots were sold by Acme Inc. The sale is documented [Smith 2001].")
+    # an initial before a capitalised surname is one sentence
+    assert _violations_in("The 1893 sale to J. Pierpont Morgan is documented [Smith 2001].") == []
+
+
+def test_sentence_ending_abbreviation_joins_before_citation_punctuation():
+    assert _violations_in("Some 47 sheets were catalogued by Kanda et al. [Kanda 2015].") == []
+    assert _violations_in("Some 47 sheets were catalogued by Kanda et al. (Kanda, 2015).") == []
+
+
+def test_closing_quote_or_bracket_after_terminal_punctuation_is_a_boundary():
+    assert _violations_in(
+        "\u201cThere were 47 works.\u201d The attribution is accepted [Smith 2001].")
+    assert _violations_in(
+        "(There were 47 works.) The attribution is accepted [Smith 2001].")
+    # Markdown emphasis and nested closers are boundaries too
+    assert _violations_in("*There were 47 works.* The attribution is accepted [Smith 2001].")
+    assert _violations_in("**There were 47 works.** The attribution is accepted [Smith 2001].")
+    assert _violations_in(
+        "(The catalogue says \u201cThere were 47 works.\u201d) The attribution is accepted [Smith 2001].")
+
+
+def test_question_or_exclamation_before_lower_case_is_still_a_boundary():
+    assert _violations_in("Were there 47? yes, according to [Smith 2001].")
+    assert _violations_in("There were 47! so the record says [Smith 2001].")
+
+
+def test_opening_quote_after_ambiguous_abbreviation_is_a_boundary():
+    assert _violations_in(
+        "There were 47 branches in the U.S. \u201cThe count is documented [Smith 2001],\u201d the report says.")
+    # but a citation marker directly after it continues the sentence
+    assert _violations_in("Some 47 sheets were catalogued by Kanda et al. [Kanda 2015].") == []
+
+
+def test_name_suffixes_are_ambiguous_not_introducers():
+    assert _violations_in("There were 47 contributors led by Smith Jr. The roster is documented [Jones 2001].")
+    assert _violations_in("Smith Jr. and 47 others signed it [Jones 2001].") == []
+
+
+def test_backticks_and_deep_closers_end_sentences():
+    assert _violations_in("`There were 47.` The count is documented [Smith 2001].")
+    assert _violations_in(
+        "(The catalogue says **\u201cThere were 47.\u201d**) The attribution is documented [Smith 2001].")
+
+
+def test_unicode_lower_case_continuation_and_plate_abbreviations():
+    assert _violations_in("Some 45 sheets circulated in the U.S. \u00e9migr\u00e9 collections [Smith 2001].") == []
+    assert _violations_in("Some 45 sheets are reproduced in pl. 4 [Smith 2001].") == []
+    assert _violations_in("Some 45 sheets are discussed at n. 12 [Smith 2001].") == []
+
+
+def test_ordinary_words_that_look_like_abbreviations_still_end_sentences():
+    assert _violations_in("There are 47 recognized forms of art. The taxonomy is documented [Smith 2001].")
+    assert _violations_in("Some 47 patients became ill. The outcome is documented [Smith 2001].")
+    assert _violations_in("The answer given by 47 respondents was no. The survey is documented [Smith 2001].")
+
+
+def test_digit_or_citation_start_after_ambiguous_abbreviation_is_a_sentence():
+    assert _violations_in("There were 47 branches in the U.S. 2020 figures are documented [Smith 2021].")
+    # a citation marker directly after 'et al.' is the common in-sentence shape and still joins
+    assert _violations_in("Some 47 sheets were catalogued by Kanda et al. [Kanda 2015].") == []
+
+
+def test_abbreviation_wrapped_in_markdown_closers_still_joins():
+    assert _violations_in("The 47 works appear in *fig.* 2 [Smith 2001].") == []
+    assert _violations_in("The 1893 sale to *J.* Pierpont Morgan is documented [Smith 2001].") == []
+
+
+def test_strikethrough_and_cjk_closers_end_sentences():
+    assert _violations_in("~~There were 47 works.~~ The attribution is documented [Smith 2001].")
+    assert _violations_in("There were 47 works.\u300d The attribution is documented [Smith 2001].")
+
+
+def test_month_abbreviations_introduce_dates_but_can_end_sentences():
+    assert _violations_in("The work sold for $300 on Mar. 3 [Smith 2020].") == []
+    assert _violations_in("Some 47 lots were sold in Jan. 1893 [Smith 2020].") == []
+    assert _violations_in("There were 47 incidents in Jan. The trend is documented [Smith 2020].")
+
+
+def test_eg_and_ie_introduce_whatever_follows():
+    assert _violations_in("There were 47 candidate models, e.g. GPT-4 and Claude [Smith 2020].") == []
+    assert _violations_in("Some 47 sheets are copies, i.e. Edo-period versions [Smith 2020].") == []
+
+
+def test_unicode_and_hyphenated_initials_join():
+    assert _violations_in("The 1893 sale to \u00c9. Zola is documented [Smith 2020].") == []
+    assert _violations_in("The 1893 sale to J.-P. Morgan is documented [Smith 2020].") == []
+
+
+def test_guillemets_close_sentences_and_markdown_wrapped_continuation_joins():
+    assert _violations_in("\u00abThere were 47 works.\u00bb The attribution is documented [Smith 2020].")
+    assert _violations_in("The 47 works appear in U.S. *and* Japanese collections [Smith 2020].") == []

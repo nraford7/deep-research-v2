@@ -103,13 +103,106 @@ CITATION_MARKER = re.compile(
     r"[\[(](?=[^\])]*[A-Za-z])[^\])]*\b(?:1[89]\d\d|20\d\d)\b[^\])]*[\])]")
 
 
+# Dots that end an abbreviation, not a sentence. Splitting on them orphaned a cited
+# quantity into a citation-free fragment ("It sold for $300 in 1893 per inv." |
+# "records [Smith 2001].") and produced false violations (2026-09-01). Lower-case,
+# without the trailing dot; multi-dot forms keep their inner dots ("e.g").
+# Abbreviations that introduce what follows ("ca. 1720", "p. 4", "inv. nos.",
+# "Dr. Smith") — a dot after one of these is never a sentence end.
+# Only tokens that are not also ordinary sentence-final words: "art.", "ill.",
+# "no.", "gen.", "rev." and the like are excluded on purpose — "forms of art. The"
+# must stay two sentences.
+_ABBREVIATIONS = frozenset({
+    "ca", "cf", "vs", "viz", "e.g", "i.e", "p", "pp", "pl", "pls", "n", "nn", "nos",
+    "inv", "cat", "fig", "figs", "fol", "fols", "vol", "vols", "ed", "eds", "ch",
+    "para", "suppl", "illus", "approx", "ff", "fl", "st", "mt", "dr", "mr", "mrs",
+    "ms", "prof",
+})
+# Months introduce a date ("Mar. 3", "Jan. 1893") but also end sentences ("in
+# Jan. The trend"): joined before a digit, lower-case or a citation marker only.
+_MONTHS = frozenset({"jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec"})
+# Abbreviations and forms that end a sentence as often as they introduce the next
+# word ("..., etc. The next", "Kanda et al. The census", "in the U.S. The", "Acme
+# Inc. The"): joined only when the continuation does not look like a new sentence
+# — lower-case or a citation marker; a digit is NOT enough ("U.S. 2020 figures").
+# Dotted initialisms (U.S., e.g., Ph.D.) and name suffixes (Jr., Sr.) are in this
+# class too. The residual false positives ("47 works in U.S. Census records [X]"
+# and "in the U.S. 2020 figures" both split) are accepted so that a cited next
+# sentence cannot launder an uncited number — the linter exists to catch those. Single-letter initials are NOT
+# ambiguous here: "J. Pierpont Morgan" is everyday art-history prose, a sentence
+# ending in a lone capital is not.
+_SENTENCE_ENDING_ABBREVIATIONS = frozenset({"etc", "al", "ibid", "cit", "seq", "inc", "ltd", "co", "corp", "bros", "jr", "sr"})
+# the token before the final dot: letters in any script, inner dots/hyphens
+# ("e.g", "U.S", "J.-P", "É"); the opener may be Markdown emphasis
+_TRAILING_TOKEN = re.compile(r"(?:^|[\s(\[\"'“‘«*_`~])([^\W\d_][^\W\d_]*(?:[.\-][^\W\d_]+)*|[^\W\d_](?:\.-[^\W\d_])*)\.$")
+_INITIALS = re.compile(r"^[^\W\d_](?:\.?-[^\W\d_])*$")   # J, É, J.-P (single letters joined by hyphens); "U.S"/"e.g" are NOT initials
+# closing quotes / brackets / Markdown delimiters that may follow terminal punctuation
+_CLOSERS = "”\"’')]*_`~»›」』）】》"
+_MARKDOWN_OPENERS = "*_`~"
+
+
+_SENTENCE_BOUNDARY = re.compile(
+    "(?:" + "|".join(r"(?<=[.!?]" + ("[" + re.escape(_CLOSERS) + "]") * n + ")" for n in range(0, 6)) + r")\s+")
+
+
+def _continues(following: str) -> bool:
+    """Does `following` read as the continuation of a clause rather than a new
+    sentence? Lower-case (any script) or a citation marker right at the start
+    ("et al. [Kanda 2015]"), looking past Markdown emphasis ("*and*"). A digit is
+    NOT enough ("in the U.S. 2020 figures ...") and neither is an opening quote —
+    quoted speech usually starts a sentence."""
+    head = following.lstrip(_MARKDOWN_OPENERS)
+    return head[:1].islower() or bool(CITATION_MARKER.match(head))
+
+
+def _joins_previous(previous: str, following: str) -> bool:
+    """True when `following` continues `previous` rather than starting a sentence:
+    the split fell after an introducing abbreviation ("ca.", "p.", "Dr.") or a
+    single-letter initial ("J. Smith") — always joined; after an ambiguous form
+    ("etc.", "et al.", "Jr.", "U.S.", "Ph.D.") — joined only before a continuation
+    (lower-case or a citation marker); or, after a plain period, before a
+    fragment that starts lower-case. Ambiguous forms before a capitalised word are
+    resolved toward SPLITTING ("in the U.S. The ... [X]" stays two sentences), so a
+    cited next sentence cannot launder an uncited number. Months join before a
+    digit as well ("Mar. 3")."""
+    core = previous.rstrip(_CLOSERS)
+    if not core.endswith("."):
+        return False   # "?" / "!" end a sentence whatever follows
+    m = _TRAILING_TOKEN.search(core)   # look past closers: "*fig.* 2", "*J.* Smith"
+    if m:
+        token = m.group(1)
+        low = token.lower()
+        if low in _ABBREVIATIONS:                       # introducers: never a sentence end
+            return True
+        if low in _MONTHS:                              # "Mar. 3", "Jan. 1893" join; "in Jan. The" splits
+            head = following.lstrip(_MARKDOWN_OPENERS)
+            return head[:1].isdigit() or _continues(following)
+        if _INITIALS.match(token) and token[:1].isupper() and len(token) <= 5:   # "J.", "É.", "J.-P."
+            return True                                  # (residual: "graded A. Then" also joins)
+        if low in _SENTENCE_ENDING_ABBREVIATIONS or "." in token or "-" in token:   # etc., et al., Jr., U.S., Ph.D.
+            return _continues(following)
+    # Plain period + lower-case start: a continuation. Residual false negative:
+    # a sentence opening with a lower-case-styled name ("pH was measured") joins.
+    return following[:1].islower()
+
+
 def _split_sentences(block: str):
-    """Split a block into sentences on terminal punctuation followed by whitespace.
-    Deliberately simple: a rare false boundary from an abbreviation (Dr., Ibid.) is
-    acceptable for a coarse tripwire. A block with no terminal punctuation is one
-    sentence."""
-    parts = re.split(r"(?<=[.!?])\s+", block.strip())
-    return [p for p in parts if p.strip()]
+    """Split a block into sentences on terminal punctuation (optionally followed by
+    closing quotes/brackets/Markdown delimiters) and whitespace, then re-join
+    fragments that were cut at an introducing abbreviation ("ca. 1720", "inv. nos.",
+    "p. 4"), at an ambiguous one followed by a continuation ("et al. [Kanda 2015]",
+    "U.S. and"), or whose continuation starts lower-case. A block with no terminal
+    punctuation is one sentence."""
+    # up to five closing quotes/brackets/Markdown delimiters after the terminal
+    # punctuation still end the sentence: .” .) .** .”) .”**)
+    parts = [p for p in _SENTENCE_BOUNDARY.split(block.strip()) if p.strip()]
+    merged: list[str] = []
+    for part in parts:
+        if merged and _joins_previous(merged[-1], part):
+            merged[-1] = merged[-1] + " " + part
+        else:
+            merged.append(part)
+    return merged
 
 
 def scan_block(block: str):
