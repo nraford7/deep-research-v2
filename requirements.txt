@@ -2,7 +2,7 @@
 # Install:  pip install -r requirements.txt
 
 # Model SDKs
-anthropic>=0.40.0
+anthropic>=0.122.0   # claude-opus-5 streams thinking blocks by default; 0.122.0 is the floor verified to decode them
 openai>=1.55.0
 google-genai>=0.3.0
 

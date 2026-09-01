@@ -158,13 +158,14 @@ BUILTIN_PROVIDER_SPECS: dict[str, dict] = {
     "claude": {
         "api_type": "anthropic",
         "family": "anthropic",
-        # The previous default `claude-opus-4-20250514` was retired and now 404s.
-        # Pinned to a current Opus; override in TOML as model IDs drift.
-        "model": "claude-opus-4-8",
+        # Earlier defaults (`claude-opus-4-20250514`, then `claude-opus-4-8`) went
+        # stale as model IDs rolled; current Opus is `claude-opus-5`, $5/$25 per MTok.
+        # Override in TOML as model IDs drift.
+        "model": "claude-opus-5",
         "env_key": "ANTHROPIC_API_KEY",
         "max_tokens": 128000,
         "capabilities": [],
-        "pricing": {"in": 15.0, "out": 75.0},
+        "pricing": {"in": 5.0, "out": 25.0},
     },
     "chatgpt": {
         "api_type": "openai",
