@@ -239,7 +239,7 @@ Create `references/jimemo-export.md` with:
 Run:
 
 ```bash
-python3 /Users/noahraford/.codex/skills/.system/skill-creator/scripts/quick_validate.py /Users/noahraford/Projects/deeper-research
+python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py ~/Projects/deeper-research
 ```
 
 Expected: PASS.
@@ -279,7 +279,7 @@ Run:
 ```bash
 python3 -m pytest tests/test_research_bible_html.py tests/test_export_html.py -q
 python3 -m pytest -q
-python3 /Users/noahraford/.codex/skills/.system/skill-creator/scripts/quick_validate.py /Users/noahraford/Projects/deeper-research
+python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py ~/Projects/deeper-research
 git diff --check
 git status --short
 ```

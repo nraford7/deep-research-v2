@@ -12,8 +12,8 @@
 
 ## Global Constraints
 
-- The canonical clone is `/Users/noahraford/Projects/deeper-research`.
-- Codex discovery is `/Users/noahraford/.agents/skills/deeper-research`; Claude discovery is `/Users/noahraford/.claude/skills/deeper-research`; both resolve to the canonical clone.
+- The canonical clone is `~/Projects/deeper-research`.
+- Codex discovery is `~/.agents/skills/deeper-research`; Claude discovery is `~/.claude/skills/deeper-research`; both resolve to the canonical clone.
 - Codex host markers take precedence when both Codex and Claude environment markers are present.
 - Explicit TOML provider and nonempty `[defaults]` choices remain authoritative; unavailable explicit choices error instead of falling back.
 - Primary reasoning uses the invoking host's native subscription-backed agents; Exa retrieval and optional OpenAI embeddings are not relabeled as subscription-backed.
@@ -173,7 +173,7 @@ policy:
 
 - [ ] **Step 6: Validate skill structure and rerun behavioral evaluation**
 
-Run: `python3 /Users/noahraford/.codex/skills/.system/skill-creator/scripts/quick_validate.py .`
+Run: `python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py .`
 
 Expected: validation succeeds. Run an isolated evaluator against the edited skill and confirm it selects Codex native agents/`codex-sub` under Codex while preserving Claude native agents/`claude-sub` under Claude.
 
@@ -187,12 +187,12 @@ git commit -m "docs: add codex and claude runtime adapters"
 ### Task 4: Canonical Installation and End-to-End Verification
 
 **Files:**
-- Move repository to: `/Users/noahraford/Projects/deeper-research`
-- Create symlink: `/Users/noahraford/.agents/skills/deeper-research`
-- Create symlink: `/Users/noahraford/.claude/skills/deeper-research`
+- Move repository to: `~/Projects/deeper-research`
+- Create symlink: `~/.agents/skills/deeper-research`
+- Create symlink: `~/.claude/skills/deeper-research`
 
 **Interfaces:**
-- Both discovery paths resolve through `realpath` to `/Users/noahraford/Projects/deeper-research`.
+- Both discovery paths resolve through `realpath` to `~/Projects/deeper-research`.
 - Git branch remains `codex-compat`; remote remains `https://github.com/nraford7/deeper-research.git`.
 
 - [ ] **Step 1: Run the complete test suite**
@@ -203,13 +203,13 @@ Expected: all tests pass with zero failures.
 
 - [ ] **Step 2: Run skill validation from the repository root**
 
-Run: `python3 /Users/noahraford/.codex/skills/.system/skill-creator/scripts/quick_validate.py .`
+Run: `python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py .`
 
 Expected: success.
 
 - [ ] **Step 3: Move the clean working clone and create discovery links**
 
-Move the existing checkout to `/Users/noahraford/Projects/deeper-research`, then create the Claude and Codex symlinks. Resolve and compare both links with `realpath`; neither may point elsewhere.
+Move the existing checkout to `~/Projects/deeper-research`, then create the Claude and Codex symlinks. Resolve and compare both links with `realpath`; neither may point elsewhere.
 
 - [ ] **Step 4: Run a minimal Codex subscription smoke test**
 
@@ -217,11 +217,11 @@ Using the project's `config.Provider(name="codex-sub", api_type="cli", command="
 
 - [ ] **Step 5: Re-run tests and validation through the canonical path**
 
-Run from `/Users/noahraford/Projects/deeper-research`:
+Run from `~/Projects/deeper-research`:
 
 ```bash
 python3 -m pytest -q
-python3 /Users/noahraford/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
+python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
 git status --short --branch
 ```
 

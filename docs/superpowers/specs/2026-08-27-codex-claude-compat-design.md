@@ -6,10 +6,10 @@ Make `deeper-research` a single shared skill that uses the invoking host's subsc
 
 ## Installation
 
-The canonical clone will live at `/Users/noahraford/Projects/deeper-research`. Both runtime discovery locations will point to it:
+The canonical clone will live at `~/Projects/deeper-research`. Both runtime discovery locations will point to it:
 
-- `/Users/noahraford/.agents/skills/deeper-research` for Codex.
-- `/Users/noahraford/.claude/skills/deeper-research` for Claude Code.
+- `~/.agents/skills/deeper-research` for Codex.
+- `~/.claude/skills/deeper-research` for Claude Code.
 
 The existing Claude checkout is clean and matches upstream commit `3e7a703`. It will be moved, not deleted or recloned, so its Git history and remote remain intact.
 

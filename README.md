@@ -116,21 +116,21 @@ See `SKILL.md` for the full architecture, prompt templates, and failure modes.
 
 ```bash
 # 1. Keep one canonical clone shared by both runtimes
-git clone https://github.com/nraford7/deeper-research.git /Users/noahraford/Projects/deeper-research
+git clone https://github.com/nraford7/deeper-research.git ~/Projects/deeper-research
 
 # 2. Expose that exact clone to both skill discovery locations
-ln -s /Users/noahraford/Projects/deeper-research ~/.agents/skills/deeper-research
-ln -s /Users/noahraford/Projects/deeper-research ~/.claude/skills/deeper-research
+ln -s ~/Projects/deeper-research ~/.agents/skills/deeper-research
+ln -s ~/Projects/deeper-research ~/.claude/skills/deeper-research
 
 # 3. Install Python dependencies once
-pip install -r /Users/noahraford/Projects/deeper-research/requirements.txt
+pip install -r ~/Projects/deeper-research/requirements.txt
 
 # 4. Set whichever API keys you have
-cp /Users/noahraford/Projects/deeper-research/.env.example ~/.env
+cp ~/Projects/deeper-research/.env.example ~/.env
 # edit ~/.env and fill in keys
 
 # 5. (Optional) Enable bundled semantic search over your research
-pip install -r /Users/noahraford/Projects/deeper-research/requirements-search.txt
+pip install -r ~/Projects/deeper-research/requirements-search.txt
 # needs OPENAI_API_KEY; without this step search just skips gracefully
 ```
 

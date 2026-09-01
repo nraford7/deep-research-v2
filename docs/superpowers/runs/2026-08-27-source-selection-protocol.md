@@ -18,7 +18,7 @@ Pass 1 [code:coverage_matrix]: 0B/0S/2C/0R · fixed -/- · velocity = (—→2, 
 
 ## Notes
 - Repo conventions: pytest, tests add ROOT to sys.path and `from scripts import <mod>`; offline tests (LLM monkeypatched, no network). Module lands in `scripts/`, test in `tests/`.
-- Target repo is NOT cwd (cwd = /Users/noahraford/magic, not a git repo); user confirmed build+commit target = ~/Projects/deeper-research on new branch off main. do-it will NOT push to main.
+- Target repo is NOT cwd (cwd = ~/magic, not a git repo); user confirmed build+commit target = ~/Projects/deeper-research on new branch off main. do-it will NOT push to main.
 - Commit 152e9dc on branch feat/source-selection-protocol, pushed to origin. PR not opened (per skill).
 - docs/ is gitignored (.gitignore:44) but prior do-it artifacts under docs/superpowers/ are tracked → matched convention with `git add -f` for the 3 artifacts.
 - Execution used Agency as mandated (project 01a04453…, task eval approve/92). Executor ran the composed task directly (Agency composes prompts, caller executes) — no deviation from policy.
