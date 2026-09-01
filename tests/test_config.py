@@ -24,6 +24,9 @@ def test_default_pairing_and_specs():
     assert set(config.BUILTIN_PROVIDER_SPECS) == {"claude", "chatgpt", "gemini", "grok"}
     assert "perplexity" not in config.BUILTIN_PROVIDER_SPECS
     assert config.BUILTIN_PROVIDER_SPECS["claude"]["api_type"] == "anthropic"
+    # current Opus id and first-party pricing; a stale id here 404s every academic-lane call
+    assert config.BUILTIN_PROVIDER_SPECS["claude"]["model"] == "claude-opus-5"
+    assert config.BUILTIN_PROVIDER_SPECS["claude"]["pricing"] == {"in": 5.0, "out": 25.0}
     assert config.BUILTIN_PROVIDER_SPECS["gemini"]["api_type"] == "gemini"
 
 def test_default_pairing_covers_every_builtin_agent_type():
