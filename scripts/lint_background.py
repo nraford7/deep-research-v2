@@ -107,8 +107,9 @@ CITATION_MARKER = re.compile(
 # quantity into a citation-free fragment ("It sold for $300 in 1893 per inv." |
 # "records [Smith 2001].") and produced false violations (2026-09-01). Lower-case,
 # without the trailing dot; multi-dot forms keep their inner dots ("e.g").
-# Abbreviations that introduce what follows ("ca. 1720", "p. 4", "inv. nos.",
-# "Dr. Smith") — a dot after one of these is never a sentence end.
+# Abbreviations that commonly introduce what follows ("ca. 1720", "p. 4",
+# "inv. nos.", "Dr. Smith"). They join only when the next fragment fits the
+# abbreviation's role; an ambiguous capitalised fragment remains a boundary.
 # Only tokens that are not also ordinary sentence-final words: "art.", "ill.",
 # "no.", "gen.", "rev." and the like are excluded on purpose — "forms of art. The"
 # must stay two sentences.
@@ -117,6 +118,27 @@ _ABBREVIATIONS = frozenset({
     "inv", "cat", "fig", "figs", "fol", "fols", "vol", "vols", "ed", "eds", "ch",
     "para", "suppl", "illus", "approx", "ff", "fl", "st", "mt", "dr", "mr", "mrs",
     "ms", "prof",
+})
+_ALWAYS_INTRODUCING_ABBREVIATIONS = frozenset({"e.g", "i.e", "vs", "viz"})
+_NAME_INTRODUCING_ABBREVIATIONS = frozenset({"dr", "mr", "mrs", "ms", "prof"})
+_EDITOR_ABBREVIATIONS = frozenset({"ed", "eds"})
+_PLACE_INTRODUCING_ABBREVIATIONS = frozenset({"st", "mt"})
+_ROMAN_REFERENCE_ABBREVIATIONS = frozenset({"fig", "figs", "pl", "pls", "vol", "vols"})
+_PAGE_LABEL_ABBREVIATIONS = frozenset({"p", "pp"})
+_INITIAL_CONTEXT = re.compile(
+    r"(?:^|\b(?:by|to|from|with|of|for|and|or|named|author|artist|scholar))\s*$",
+    re.IGNORECASE,
+)
+_INITIAL_CONTEXT_WORDS = frozenset({
+    "by", "to", "from", "with", "of", "for", "and", "or", "named", "author", "artist", "scholar",
+})
+_PLACE_CONTEXT = re.compile(
+    r"(?:^|\b(?:at|in|on|near|from|to|of|around|toward|towards|outside|inside))\s*$",
+    re.IGNORECASE,
+)
+_SENTENCE_STARTERS = frozenset({
+    "a", "an", "the", "this", "that", "these", "those", "it", "he", "she", "they", "we", "i",
+    "then", "however", "therefore", "thus", "meanwhile", "nevertheless", "nonetheless",
 })
 # Months introduce a date ("Mar. 3", "Jan. 1893") but also end sentences ("in
 # Jan. The trend"): joined before a digit, lower-case or a citation marker only.
@@ -155,16 +177,68 @@ def _continues(following: str) -> bool:
     return head[:1].islower() or bool(CITATION_MARKER.match(head))
 
 
+def _starts_name(following: str) -> bool:
+    head = following.lstrip(_MARKDOWN_OPENERS)
+    return bool(head[:1] and head[:1].isupper())
+
+
+def _leading_token(following: str) -> str:
+    head = following.lstrip(_MARKDOWN_OPENERS)
+    match = re.match(r"([^\s,;:!?()[\]{}]+)", head)
+    return match.group(1).rstrip(".\"'\u2019\u201d") if match else ""
+
+
+def _starts_person_name(following: str) -> bool:
+    token = _leading_token(following)
+    return bool(token[:1].isupper() and token.lower() not in _SENTENCE_STARTERS)
+
+
+def _starts_roman_reference(following: str) -> bool:
+    return bool(re.fullmatch(r"[IVXLCDM]+", _leading_token(following)))
+
+
+def _starts_page_label(following: str) -> bool:
+    return bool(re.fullmatch(r"(?:\d+[A-Za-z]?|[A-Z]+\d+)", _leading_token(following)))
+
+
+def _looks_like_name_piece(piece: str) -> bool:
+    token = piece.strip("*_`~\"'\u2018\u2019\u201c\u201d(),;:")
+    if token.endswith("."):
+        token = token[:-1]
+    if _INITIALS.fullmatch(token):
+        return token[:1].isupper()
+    chunks = re.split(r"[-'\u2019]", token)
+    return bool(chunks and all(chunk[:1].isupper() and chunk.isalpha() for chunk in chunks))
+
+
+def _initial_has_name_context(core: str, match: re.Match) -> bool:
+    prefix = core[:match.start(1)].rstrip(_MARKDOWN_OPENERS)
+    if _INITIAL_CONTEXT.search(prefix):
+        return True
+    words = prefix.split()
+    for index in range(len(words) - 1, -1, -1):
+        context_word = words[index].strip("*_`~\"'\u2018\u2019\u201c\u201d(),;:").lower()
+        if context_word in _INITIAL_CONTEXT_WORDS:
+            tail = words[index + 1:]
+            return bool(tail and all(_looks_like_name_piece(piece) for piece in tail))
+    return False
+
+
+def _place_abbreviation_has_context(core: str, match: re.Match) -> bool:
+    prefix = core[:match.start(1)].rstrip(_MARKDOWN_OPENERS)
+    return not prefix.strip() or bool(_PLACE_CONTEXT.search(prefix))
+
+
 def _joins_previous(previous: str, following: str) -> bool:
     """True when `following` continues `previous` rather than starting a sentence:
-    the split fell after an introducing abbreviation ("ca.", "p.", "Dr.") or a
-    single-letter initial ("J. Smith") — always joined; after an ambiguous form
-    ("etc.", "et al.", "Jr.", "U.S.", "Ph.D.") — joined only before a continuation
-    (lower-case or a citation marker); or, after a plain period, before a
-    fragment that starts lower-case. Ambiguous forms before a capitalised word are
-    resolved toward SPLITTING ("in the U.S. The ... [X]" stays two sentences), so a
-    cited next sentence cannot launder an uncited number. Months join before a
-    digit as well ("Mar. 3")."""
+    the split fell after an introducing abbreviation ("ca.", "p.", "Dr.") whose
+    continuation fits its role, or a single-letter initial in name context; after
+    an ambiguous form ("etc.", "et al.", "Jr.", "U.S.", "Ph.D.") — joined only
+    before a continuation (lower-case or a citation marker). Plain periods stay
+    boundaries. Ambiguous forms before a capitalised word are resolved toward
+    SPLITTING ("in the U.S. The ... [X]" stays two sentences), so a cited next
+    sentence cannot launder an uncited number. Months join before a digit as well
+    ("Mar. 3")."""
     core = previous.rstrip(_CLOSERS)
     if not core.endswith("."):
         return False   # "?" / "!" end a sentence whatever follows
@@ -172,27 +246,41 @@ def _joins_previous(previous: str, following: str) -> bool:
     if m:
         token = m.group(1)
         low = token.lower()
-        if low in _ABBREVIATIONS:                       # introducers: never a sentence end
-            return True
+        if low in _ABBREVIATIONS:
+            if low in _ALWAYS_INTRODUCING_ABBREVIATIONS:
+                return True
+            if low in _NAME_INTRODUCING_ABBREVIATIONS:
+                return _starts_person_name(following) or _continues(following)
+            if low in _EDITOR_ABBREVIATIONS:
+                return _starts_person_name(following) or _continues(following)
+            if low in _PLACE_INTRODUCING_ABBREVIATIONS:
+                return (_starts_person_name(following) and _place_abbreviation_has_context(core, m)) or _continues(following)
+            if low in _ROMAN_REFERENCE_ABBREVIATIONS and _starts_roman_reference(following):
+                return True
+            if low in _PAGE_LABEL_ABBREVIATIONS and _starts_page_label(following):
+                return True
+            head = following.lstrip(_MARKDOWN_OPENERS)
+            return head[:1].isdigit() or _continues(following)
         if low in _MONTHS:                              # "Mar. 3", "Jan. 1893" join; "in Jan. The" splits
             head = following.lstrip(_MARKDOWN_OPENERS)
             return head[:1].isdigit() or _continues(following)
-        if _INITIALS.match(token) and token[:1].isupper() and len(token) <= 5:   # "J.", "É.", "J.-P."
-            return True                                  # (residual: "graded A. Then" also joins)
+        if (_INITIALS.match(token) and token[:1].isupper() and len(token) <= 5
+                and _starts_name(following) and _initial_has_name_context(core, m)):
+            return True                                  # "by J. Smith", "to É. Zola"
         if low in _SENTENCE_ENDING_ABBREVIATIONS or "." in token or "-" in token:   # etc., et al., Jr., U.S., Ph.D.
             return _continues(following)
-    # Plain period + lower-case start: a continuation. Residual false negative:
-    # a sentence opening with a lower-case-styled name ("pH was measured") joins.
-    return following[:1].islower()
+    # Ambiguous plain periods remain boundaries. Lowercase-styled sentence starts
+    # such as "pH was measured" must not license an uncited previous quantity.
+    return False
 
 
 def _split_sentences(block: str):
     """Split a block into sentences on terminal punctuation (optionally followed by
     closing quotes/brackets/Markdown delimiters) and whitespace, then re-join
-    fragments that were cut at an introducing abbreviation ("ca. 1720", "inv. nos.",
-    "p. 4"), at an ambiguous one followed by a continuation ("et al. [Kanda 2015]",
-    "U.S. and"), or whose continuation starts lower-case. A block with no terminal
-    punctuation is one sentence."""
+    fragments that were cut at a contextually introducing abbreviation ("ca. 1720",
+    "inv. nos.", "p. 4"), at an ambiguous one followed by a continuation ("et al. [Kanda 2015]",
+    "U.S. and"), or at an initial in high-confidence name context. A block with no
+    terminal punctuation is one sentence."""
     # up to five closing quotes/brackets/Markdown delimiters after the terminal
     # punctuation still end the sentence: .” .) .** .”) .”**)
     parts = [p for p in _SENTENCE_BOUNDARY.split(block.strip()) if p.strip()]

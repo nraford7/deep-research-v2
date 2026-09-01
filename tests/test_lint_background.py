@@ -292,3 +292,51 @@ def test_unicode_and_hyphenated_initials_join():
 def test_guillemets_close_sentences_and_markdown_wrapped_continuation_joins():
     assert _violations_in("\u00abThere were 47 works.\u00bb The attribution is documented [Smith 2020].")
     assert _violations_in("The 47 works appear in U.S. *and* Japanese collections [Smith 2020].") == []
+
+
+def test_lowercase_styled_sentence_does_not_license_previous_quantity():
+    """A legitimate lowercase-styled sentence start is still a new sentence."""
+    assert _violations_in("There were 47 samples. pH was measured [Smith 2001].")
+
+
+def test_grade_letter_does_not_turn_the_next_sentence_into_a_name():
+    """A capital before a full stop is not automatically a person's initial."""
+    assert _violations_in(
+        "Some 47 samples were graded A. Then the scale was documented [Smith 2001].")
+
+
+def test_sentence_final_introducer_does_not_join_a_capitalised_sentence():
+    """An introducing abbreviation only joins when what follows fits its role."""
+    assert _violations_in(
+        "The estimate was 47, approx. This method is documented [Smith 2001].")
+
+
+@pytest.mark.parametrize("text", [
+    "The 47 plates appear in vol. II [Smith 2001].",
+    "The 47 plates appear in fig. IV [Smith 2001].",
+    "The 47 plates appear on p. A12 [Smith 2001].",
+    "The 47 plates are cited in ed. Jones [Smith 2001].",
+])
+def test_uppercase_bibliographic_continuations_stay_in_the_cited_sentence(text):
+    assert _violations_in(text) == []
+
+
+@pytest.mark.parametrize("text", [
+    "The 47 plates were catalogued by Charles J. Smith [Smith 2001].",
+    "The 47 plates were catalogued by A. B. Smith [Smith 2001].",
+    "The 47 plates were catalogued by John J.-P. Smith [Smith 2001].",
+])
+def test_middle_and_multi_initial_names_stay_in_the_cited_sentence(text):
+    assert _violations_in(text) == []
+
+
+def test_terminal_place_abbreviation_does_not_license_previous_quantity():
+    assert _violations_in(
+        "The 47 objects were stored on Main St. The inventory is documented [Smith 2001].")
+
+
+def test_place_abbreviation_still_introduces_a_place_name():
+    assert _violations_in(
+        "The 47 objects were stored in St. Louis [Smith 2001].") == []
+    assert _violations_in(
+        "The 47 objects were found on Mt. Fuji [Smith 2001].") == []
