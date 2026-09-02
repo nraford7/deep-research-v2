@@ -313,6 +313,31 @@ long or longer). Requires `pypdf` (in `requirements.txt`); without it, PDF rows
 skip gracefully. Set `CONTACT_EMAIL` (in `~/.env`) so OpenAlex OA-PDF lookups use
 the polite pool and resolve more open-access documents.
 
+### Local KB documents
+
+User-provided documents (client PDFs, contracts, internal reports) enter the
+evidence store through ingestion — never by pasting their contents into prose.
+Legacy runs use the CLI directly; managed V2 runs go through the broker helper
+(same invocation shape as the deepen-questions helper in Round 5):
+
+```bash
+# Legacy run dir:
+python3 scripts/ingest_local.py --run-dir research/[slug] --year 2024 client-doc.pdf
+
+# Managed V2 run:
+python3 scripts/run_manager.py invoke-helper \
+  --broker-endpoint "$BROKER" --lease-token "$TOKEN" \
+  --helper ingest-local \
+  --args-json '{"files":["/abs/path/doc.pdf"],"year":2024}'
+```
+
+Rows land in `round1/slice_local.jsonl` with a `kb_slug` (plus extracted text in
+the sources dir), so the gate, the number sweep, and the adversary all see them
+like any slice row. Cite an ingested document as `[kb:<slug>, <year>]` — or
+`[kb:<slug>, n.d.]` when it carries no year. **Empty extraction is a hard
+failure** (exit `3`): a scanned/encrypted PDF must never become a resolvable KB
+handle or count toward the evidence gate.
+
 **Step 1.4b · citation chase (run after the gate passes, before the coverage audit).**
 This does evidence-grounded graph fill FIRST, so the model-memory coverage auditor then
 reasons over the enlarged corpus. It walks one hop out of the Round-1 seeds purely from
@@ -515,6 +540,14 @@ Writes `round2_5/answer_NN_<bucket>.md` (each with a terminal `## Sources` block
 Round 1: a per-question fail-open skips + continues (exit 0); a cap breach writes
 `coverage.json` FIRST, then exits `21`.
 
+Each answer file also carries a `## Evidence` block — the retained Exa
+highlights/grounding the model actually saw — with the raw evidence saved as
+`round2_5/grounding_NN.json`. Quantity sentences the retrieved evidence does NOT
+support arrive pre-marked `[UNVERIFIED — not in retrieved evidence]`.
+**Integration must carry the marker forward or drop the claim — never silently
+strip it:** a stripped marker turns an unverified number back into confident
+prose, the exact failure this marking exists to prevent.
+
 ## Round 3 — Integration
 
 Read four inputs and **explain the field, position by position** — the Round-1 briefs, the
@@ -663,6 +696,41 @@ a normal cited statement, the ONLY paths are BY HAND: either find a real retriev
 citation and rewrite the claim as normal cited prose carrying that `[Author, Year]`, or
 cut it. A fenced claim with no retrieved citation stays inside its fence or is dropped:
 it is never lifted out unsupported.
+
+**Number-provenance sweep (orchestrator-run checklist step, after the lint).**
+Before the adversary, sweep every digit-bearing claim in the sections against the
+retrieved evidence:
+
+```bash
+python3 scripts/sweep_numbers.py --run-dir research/[slug] \
+  --output research/[slug]/round4/number-sweep.md
+```
+
+Exit `1` = at least one number in the sections appears NOWHERE in retrieved
+evidence — the fabrication class. The orchestrator MUST resolve each flag before
+the adversary runs: **(a)** find and cite a source that carries the number,
+**(b)** correct the number to what the evidence says, or **(c)** cut the claim.
+Know the tripwire's limit: this is an **existence check, not source binding** — a
+number that exists in an *unrelated* source still passes; binding numbers to the
+right source remains the Round-4 adversary's job. For MANAGED V2 runs, `--output`
+must point OUTSIDE the run (a scratch dir): the mutation guard refuses in-run
+writes **by design** — do not work around it. Reading the run's evidence is fine
+(reads are unguarded); the orchestrator publishes the report into the run via the
+broker.
+
+**Strict verifier re-run.** After the sweep, run the citation verifier in strict
+mode so unknown KB slugs and unparseable citation shapes fail the gate instead of
+merely appearing in the report:
+
+```bash
+python3 scripts/verify_citations.py research/[slug]/sections/ \
+  --output research/[slug]/round4/citation-verification.md \
+  --fail-on kb-unknown,unparseable
+```
+
+Exit `1` = a `[kb:<slug>, …]` cite resolves to no ingested document, or a
+bracketed span matches no known citation shape. The default (no `--fail-on`)
+keeps the old exit-0-always behavior; strict mode is the Round-4 gate.
 
 **Step 4.2 — refute-mode adversary (an INDEPENDENT provider family).** Dispatch one
 adversary subagent whose job is to *refute* the draft — find unsupported claims, weak
