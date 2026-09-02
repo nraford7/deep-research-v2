@@ -56,6 +56,16 @@ _YEAR_ALT = r"\d{4}[a-z]?|n\.d\."
 INLINE_CITE_RE = re.compile(
     rf"[\[\(]\s*(?:(?P<domain>{_DOMAIN_ALT})|(?P<author>{_AUTHOR_ALT})),?\s*(?P<year>{_YEAR_ALT})\s*[\]\)]"
 )
+# KB citations — kept BYTE-FOR-BYTE identical to verify_citations.py's
+# KB_CITE_RE (same alignment rule as INLINE_CITE_RE above). If these diverge,
+# KB cites never reach claims.jsonl.
+KB_CITE_RE = re.compile(r"\[\s*kb:(?P<slug>[a-z0-9][a-z0-9-]*)\s*,\s*(?P<kbyear>\d{4}|n\.d\.)\s*\]")
+
+
+def _kb_cite_dict(m):
+    return {"author": f"kb:{m.group('slug')}", "year": m.group("kbyear"), "kind": "kb"}
+
+
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
 BIB_BULLET_RE = re.compile(r"^\s*(?:[-*]\s+|\d+\.\s+)")
 
@@ -214,6 +224,7 @@ def extract_claims(sections_dir: Path, *, run_root: Path | None = None):
         for sent in sentences:
             cites = [c for c in (_cite_dict(m, sent) for m in INLINE_CITE_RE.finditer(sent))
                      if c is not None]
+            cites.extend(_kb_cite_dict(m) for m in KB_CITE_RE.finditer(sent))
             if not cites:
                 continue
             yield {
