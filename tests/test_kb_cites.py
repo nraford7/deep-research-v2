@@ -47,6 +47,23 @@ def test_code_fences_excluded():
     text = "```\n[weird thing, 2020]\n```\nand `[inline, 2020]` too"
     assert vc.find_unparseable_cites(text) == []
 
+def test_case_variant_nd_is_flagged_unparseable():
+    # FE7: uppercase N.D. is citation-ish but matches no grammar → flag.
+    flags = vc.find_unparseable_cites("per the site [site, N.D.] the fee...")
+    assert len(flags) == 1 and "N.D." in flags[0]
+
+def test_suffixed_year_is_flagged_unparseable():
+    # FE7: a suffixed year (2020a) behind a semicolon is unparseable.
+    flags = vc.find_unparseable_cites("x [Smith; 2020a] y")
+    assert len(flags) == 1 and "2020a" in flags[0]
+
+def test_citeish_markdown_link_is_flagged():
+    # FE8: a semicolon+year label hiding inside a markdown link is a
+    # malformed citation, not a link — flag it.
+    flags = vc.find_unparseable_cites(
+        "see [Invented Source; 2020](https://example.com) for details")
+    assert len(flags) == 1 and "Invented Source" in flags[0]
+
 
 def _manifest(tmp_path, rows):
     p = tmp_path / "slice_local.jsonl"
@@ -58,7 +75,8 @@ def test_kb_resolution(tmp_path):
         {"kb_slug": "acme-contract-v2", "year": 2024, "url": "file:///x", "tier": "user-provided"},
         {"kb_slug": "board-memo", "url": "file:///y", "tier": "user-provided"},
     ])
-    manifest = vc.load_kb_manifest([p])
+    manifest, duplicates = vc.load_kb_manifest([p])
+    assert duplicates == []
     known, unknown, mismatch, unchecked = vc.check_kb_cites(
         [{"slug": "acme-contract-v2", "year": "2024", "kind": "kb"},   # known
          {"slug": "acme-contract-v2", "year": "2099", "kind": "kb"},   # mismatch
@@ -72,6 +90,21 @@ def test_kb_resolution(tmp_path):
         ("acme-contract-v2", "2099"), ("acme-contract-v2", "n.d.")]
     assert [(c["slug"], c["year"]) for c in unchecked] == [("board-memo", "2020")]
     assert len(known) == 2
+
+
+def test_kb_manifest_first_wins_and_duplicates_recorded(tmp_path):
+    # FE9: slice_local.jsonl is passed before inherited_corpus.jsonl — the
+    # child run's local entry must beat an inherited parent duplicate, and
+    # the duplicate slug must be recorded.
+    p1 = tmp_path / "slice_local.jsonl"
+    p1.write_text(json.dumps({"kb_slug": "memo", "year": 2024}) + "\n",
+                  encoding="utf-8")
+    p2 = tmp_path / "inherited_corpus.jsonl"
+    p2.write_text(json.dumps({"kb_slug": "memo", "year": 1999}) + "\n",
+                  encoding="utf-8")
+    manifest, duplicates = vc.load_kb_manifest([p1, p2])
+    assert manifest["memo"]["year"] == 2024
+    assert duplicates == ["memo"]
 
 
 def test_pre1800_malformed_cite_is_still_flagged():
@@ -91,6 +124,22 @@ def test_fail_on_exit_codes(tmp_path):
     assert strict.returncode == 1
     report = json.loads((tmp_path / "r.json").read_text())
     assert report["kb_unknown"] and report["unparseable_cites"]
+    assert report["kb_duplicate_slugs"] == []
+
+
+def test_fail_on_unknown_class_is_usage_error(tmp_path):
+    # C2: an unrecognized --fail-on class is a usage error (exit 2) BEFORE
+    # any network or report work; valid classes are named on stderr.
+    import subprocess
+    md = tmp_path / "sec.md"
+    md.write_text("plain prose, no citations")
+    r = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "verify_citations.py"), str(md),
+         "--output", str(tmp_path / "r.md"), "--fail-on", "kb_unknown"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    assert r.returncode == 2
+    assert "kb-unknown" in r.stderr and "unparseable" in r.stderr
+    assert not (tmp_path / "r.md").exists()   # exited before report work
 
 def test_export_and_verifier_kb_regexes_are_byte_identical():
     from scripts import export

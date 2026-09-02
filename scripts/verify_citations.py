@@ -429,7 +429,10 @@ _BRACKET_EXCLUDE_RE = re.compile(
     r"^\s*(?:as of:|confidence:|disputed:|UNVERIFIED|r2\.5-|\^)", re.IGNORECASE)
 _BRACKET_SPAN_RE = re.compile(r"\[[^\]]{1,200}\]")
 _CODE_SPAN_RE = re.compile(r"```.*?```|`[^`\n]*`", re.DOTALL)
-_HAS_YEAR_RE = re.compile(r"\b\d{4}\b|\bn\.d\.")  # any 4-digit year (1776 too)
+# Any 4-digit year (1776 too), suffixed years (2020a), and case-variant n.d.
+# (N.D.). Deliberately broader than INLINE_CITE_RE's year alt: this is the
+# "citation-ish" prefilter, so near-miss years must land here, not slip by.
+_HAS_YEAR_RE = re.compile(r"\b\d{4}[a-z]?\b|\bn\.d\.", re.IGNORECASE)
 
 
 def extract_kb_cites(text: str):
@@ -453,8 +456,12 @@ def find_unparseable_cites(text: str):
     for m in _BRACKET_SPAN_RE.finditer(text):
         span = m.group(0)
         inner = span[1:-1]
-        if text[m.end():m.end() + 1] == "(":     # markdown link [text](url)
-            continue
+        if text[m.end():m.end() + 1] == "(":
+            # Markdown link [text](url) — UNLESS the label itself is cite-ish
+            # (semicolon AND a year, e.g. "[Invented Source; 2020](url)"):
+            # that's a malformed citation hiding as a link, so flag it.
+            if not (";" in inner and _HAS_YEAR_RE.search(inner)):
+                continue
         if _BRACKET_EXCLUDE_RE.match(inner):     # metadata tags / footnotes
             continue
         if not _HAS_YEAR_RE.search(inner):
@@ -473,7 +480,12 @@ def find_unparseable_cites(text: str):
 
 
 def load_kb_manifest(paths):
+    """FIRST-wins across ``paths``: slice_local.jsonl is passed before
+    inherited_corpus.jsonl, so the child run's local entry beats an inherited
+    parent duplicate. Returns (manifest, duplicate_slugs) — every slug seen
+    more than once is recorded, never silently shadowed."""
     manifest = {}
+    duplicates = []
     for p in paths:
         p = Path(p)
         if not p.exists():
@@ -487,9 +499,14 @@ def load_kb_manifest(paths):
             except json.JSONDecodeError:
                 continue
             slug = row.get("kb_slug")
-            if slug:
-                manifest[slug] = row
-    return manifest
+            if not slug:
+                continue
+            if slug in manifest:
+                if slug not in duplicates:
+                    duplicates.append(slug)
+                continue
+            manifest[slug] = row
+    return manifest, duplicates
 
 
 def check_kb_cites(kb_cites, manifest):
@@ -746,6 +763,17 @@ def main():
                     help="comma list: kb-unknown,unparseable — exit 1 when non-empty")
     args = ap.parse_args()
 
+    # Validate --fail-on UP FRONT (before any network/report work): a typo'd
+    # class name silently disabling the strict gate is worse than a hard stop.
+    valid_fail_classes = {"kb-unknown", "unparseable"}
+    fail_classes = {c.strip() for c in args.fail_on.split(",") if c.strip()}
+    invalid_classes = fail_classes - valid_fail_classes
+    if invalid_classes:
+        print(f"unknown --fail-on class(es): {', '.join(sorted(invalid_classes))}"
+              f" — valid classes: {', '.join(sorted(valid_fail_classes))}",
+              file=sys.stderr)
+        sys.exit(2)
+
     s = session()
     files = find_md_files(Path(args.path))
     if not files:
@@ -781,8 +809,9 @@ def main():
         if layout is not None:
             manifest_paths = [layout.round1 / "slice_local.jsonl",
                               layout.round1 / "inherited_corpus.jsonl"]
+    kb_manifest, kb_duplicates = load_kb_manifest(manifest_paths)
     kb_known, kb_unknown, kb_mismatch, kb_unchecked = check_kb_cites(
-        all_kb, load_kb_manifest(manifest_paths))
+        all_kb, kb_manifest)
 
     bib_unique = list(dict.fromkeys(all_bib))
     # A WEB-only bibliography entry has no 4-digit academic year but carries a
@@ -907,6 +936,12 @@ def main():
             out.append(f"- `[kb:{c['slug']}, {c['year']}]` in `{c.get('file', '?')}`")
         out.append("")
 
+    if kb_duplicates:
+        out += ["## KB duplicate slugs", "",
+                "Same slug in more than one manifest (first file wins — the "
+                "run's local entry beats an inherited duplicate): "
+                + ", ".join(f"`{s_}`" for s_ in kb_duplicates), ""]
+
     if kb_unchecked:
         out += ["## KB year unchecked", "",
                 "The ingested document has no recorded year, so the cited year cannot be "
@@ -1010,13 +1045,14 @@ def main():
             "kb_unknown": kb_unknown,
             "kb_year_mismatch": kb_mismatch,
             "kb_year_unchecked": kb_unchecked,
+            "kb_duplicate_slugs": kb_duplicates,
             "unparseable_cites": [{"span": span, "file": fname} for span, fname in all_unparseable],
         }, indent=2), encoding="utf-8")
     print(f"\nReport: {args.output}", flush=True)
     print(f"JSON: {json_path}", flush=True)
 
     # Opt-in strictness: the default exit path stays 0 regardless of findings.
-    fail_classes = {c.strip() for c in args.fail_on.split(",") if c.strip()}
+    # (fail_classes was validated up front, before any network/report work.)
     if ("kb-unknown" in fail_classes and kb_unknown) or \
             ("unparseable" in fail_classes and all_unparseable):
         sys.exit(1)

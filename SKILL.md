@@ -730,7 +730,11 @@ python3 scripts/verify_citations.py research/[slug]/sections/ \
 
 Exit `1` = a `[kb:<slug>, …]` cite resolves to no ingested document, or a
 bracketed span matches no known citation shape. The default (no `--fail-on`)
-keeps the old exit-0-always behavior; strict mode is the Round-4 gate.
+keeps the old exit-0-always behavior; strict mode is the Round-4 gate. For
+MANAGED V2 runs, `--output` must point OUTSIDE the run (a scratch dir): the
+mutation guard refuses in-run writes **by design** — do not work around it.
+Reading the run's sections is fine (reads are unguarded); the orchestrator
+publishes the report into the run via the broker.
 
 **Step 4.2 — refute-mode adversary (an INDEPENDENT provider family).** Dispatch one
 adversary subagent whose job is to *refute* the draft — find unsupported claims, weak

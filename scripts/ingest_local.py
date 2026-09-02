@@ -20,6 +20,7 @@ Usage:
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from contextlib import nullcontext
@@ -57,34 +58,50 @@ def _extract_text(path: Path, data: bytes) -> str | None:
     if suffix in (".html", ".htm"):
         return _html_to_text(data)
     if suffix in _TEXT_SUFFIXES:
-        return data.decode("utf-8", errors="replace")
+        # Binary content wearing a text suffix must NOT mint a KB handle:
+        # NUL bytes, or a decoded stream that is >10% U+FFFD replacement
+        # characters, is an extraction FAILURE (None → exit 3, no row).
+        if b"\x00" in data:
+            return None
+        text = data.decode("utf-8", errors="replace")
+        if text and text.count("�") / len(text) > 0.10:
+            return None
+        return text
     return None
 
 
-def _load_rows(jsonl: Path) -> list[dict]:
+def _load_entries(jsonl: Path) -> list:
+    """Ordered file entries: parsed dicts for JSON rows, raw ``str`` lines
+    (kept VERBATIM) for anything unparseable/foreign — never dropped."""
     if not jsonl.exists():
         return []
-    rows = []
+    entries = []
     for line in jsonl.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return rows
+        if not line.strip():
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            entries.append(line)
+    return entries
 
 
-def _write_rows(jsonl: Path, rows: list[dict]) -> None:
+def _write_entries(jsonl: Path, entries: list) -> None:
+    """Atomic rewrite: tmp file in the same dir + os.replace, so a crash can
+    never leave a half-written slice_local.jsonl. Foreign ``str`` entries are
+    written back verbatim."""
     jsonl.parent.mkdir(parents=True, exist_ok=True)
-    jsonl.write_text(
-        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
-        encoding="utf-8")
+    payload = "".join(
+        (e if isinstance(e, str) else json.dumps(e, ensure_ascii=False)) + "\n"
+        for e in entries)
+    tmp = jsonl.with_name(jsonl.name + ".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, jsonl)
 
 
-def ingest_one(path: Path, layout, rows: list[dict], *, title=None, slug=None,
+def ingest_one(path: Path, layout, entries: list, *, title=None, slug=None,
                year=None) -> dict | None:
-    """Extract one document and merge its row into ``rows`` in place.
+    """Extract one document and merge its row into ``entries`` in place.
     Returns the row, or None when extraction yields no text.
     (Format allowlist is enforced by the caller BEFORE this runs.)"""
     data = path.read_bytes()
@@ -92,6 +109,7 @@ def ingest_one(path: Path, layout, rows: list[dict], *, title=None, slug=None,
     if not text:
         return None
     url = path.resolve().as_uri()
+    rows = [e for e in entries if isinstance(e, dict)]
     # Idempotence is by kb_slug (spec): an EXPLICIT --slug always replaces the
     # row carrying that slug — a replacement document under the same logical
     # handle updates the entry. An AUTO slug replaces only its own url; a
@@ -101,6 +119,11 @@ def ingest_one(path: Path, layout, rows: list[dict], *, title=None, slug=None,
     if slug is not None:
         kb_slug = slug
         replace = existing_by_slug.get(kb_slug)
+        # One document = one row: an explicit slug also retires any OTHER row
+        # this same file produced earlier (e.g. under an auto slug).
+        for stale in [r for r in rows
+                      if r.get("url") == url and r is not replace]:
+            entries.remove(stale)
     elif url in existing_by_url:
         replace = existing_by_url[url]
         kb_slug = replace["kb_slug"]
@@ -135,9 +158,9 @@ def ingest_one(path: Path, layout, rows: list[dict], *, title=None, slug=None,
     sources_dir.mkdir(parents=True, exist_ok=True)
     (sources_dir / spill_name).write_text(text, encoding="utf-8")
     if replace is not None:
-        rows[rows.index(replace)] = row
+        entries[entries.index(replace)] = row
     else:
-        rows.append(row)
+        entries.append(row)
     return row
 
 
@@ -158,6 +181,11 @@ def main(argv=None):
         print(f"invalid --slug {args.slug!r}: must match [a-z0-9][a-z0-9-]* "
               f"(the [kb:slug] citation grammar)", file=sys.stderr)
         return EXIT_USAGE
+    if args.year is not None and not 1000 <= args.year <= 9999:
+        print(f"invalid --year {args.year}: must be a 4-digit year "
+              f"(1000–9999 — KB_CITE_RE only matches 4 digits)",
+              file=sys.stderr)
+        return EXIT_USAGE
     for f in files:
         if not f.is_file():
             print(f"not a file: {f}", file=sys.stderr)
@@ -165,7 +193,7 @@ def main(argv=None):
         suffix = f.suffix.lower()
         if suffix not in _TEXT_SUFFIXES | {".pdf", ".html", ".htm"}:
             print(f"unsupported format {suffix!r}: {f} — ingestable formats "
-                  f"are pdf/html/txt/md", file=sys.stderr)
+                  f"are pdf/html/htm/txt/md/markdown/text", file=sys.stderr)
             return EXIT_USAGE
 
     layout = resolve_helper_layout(Path(args.run_dir))
@@ -177,11 +205,11 @@ def main(argv=None):
     guard = (nullcontext() if is_broker_managed()
              else standalone_mutation_guard(jsonl, operation="local KB ingestion"))
     with guard:
-        rows = _load_rows(jsonl)
+        entries = _load_entries(jsonl)
         failures = 0
         for f in files:
-            row = ingest_one(f, layout, rows, title=args.title, slug=args.slug,
-                             year=args.year)
+            row = ingest_one(f, layout, entries, title=args.title,
+                             slug=args.slug, year=args.year)
             if row is None:
                 failures += 1
                 print(f"  ✗ {f}: extraction produced no text (scanned/encrypted "
@@ -189,7 +217,7 @@ def main(argv=None):
             else:
                 print(f"  ✓ [kb:{row['kb_slug']}] {f.name} → {row['text_path']} "
                       f"({row['text_chars']} chars)")
-        _write_rows(jsonl, rows)
+        _write_entries(jsonl, entries)
     return EXIT_EXTRACTION if failures else 0
 
 

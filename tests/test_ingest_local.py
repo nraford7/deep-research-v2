@@ -115,6 +115,69 @@ def test_unsupported_binary_format_is_usage_error(tmp_path):
     assert _rows(run) == []
 
 
+def test_binary_content_in_txt_is_extraction_failure(tmp_path):
+    # S5: binary bytes under a .txt suffix (NUL bytes / replacement-char
+    # noise) must NOT mint a resolvable KB handle — extraction failure.
+    run = _mk_legacy_run(tmp_path)
+    doc = tmp_path / "fake.txt"
+    doc.write_bytes(b"\x89PNG\x00\x01binary")
+    assert _run(run, doc) == 3
+    assert _rows(run) == []
+
+
+def test_new_explicit_slug_retires_auto_slug_row(tmp_path):
+    # C1: one document = one row — re-ingesting the same file under an
+    # explicit slug must retire the earlier auto-slug row for that url.
+    run = _mk_legacy_run(tmp_path)
+    doc = tmp_path / "doc.txt"
+    doc.write_text("stable content")
+    assert _run(run, doc) == 0
+    assert _run(run, "--slug", "new-handle", doc) == 0
+    rows = _rows(run)
+    assert len(rows) == 1 and rows[0]["kb_slug"] == "new-handle"
+
+
+def test_foreign_jsonl_lines_preserved_verbatim(tmp_path):
+    # FE5: rewriting slice_local.jsonl must never silently drop lines it
+    # cannot parse — they are preserved verbatim; new rows still append.
+    run = _mk_legacy_run(tmp_path)
+    a = tmp_path / "a.txt"; a.write_text("doc a")
+    assert _run(run, a) == 0
+    jsonl = run / "round1" / "slice_local.jsonl"
+    with jsonl.open("a", encoding="utf-8") as fh:
+        fh.write("not-json{\n")
+    b = tmp_path / "b.txt"; b.write_text("doc b")
+    assert _run(run, b) == 0
+    lines = jsonl.read_text(encoding="utf-8").splitlines()
+    assert "not-json{" in lines
+    parsed = []
+    for line in lines:
+        try:
+            parsed.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    assert {r["kb_slug"] for r in parsed} == {"a", "b"}
+
+
+def test_year_out_of_range_is_usage_error(tmp_path):
+    # FE10: KB_CITE_RE only matches 4-digit years — reject the rest up front.
+    run = _mk_legacy_run(tmp_path)
+    doc = tmp_path / "d.txt"; doc.write_text("x")
+    assert _run(run, "--year", "24", doc) == 2
+    assert _rows(run) == []
+
+
+def test_unsupported_format_message_lists_allowlist(tmp_path, capsys):
+    # C5: the usage error must name the ACTUAL allowlist.
+    run = _mk_legacy_run(tmp_path)
+    doc = tmp_path / "image.png"
+    doc.write_bytes(b"\x89PNG\r\n\x1a\nxxxx")
+    assert _run(run, doc) == 2
+    err = capsys.readouterr().err
+    for fmt in ("pdf", "html", "htm", "txt", "md", "markdown", "text"):
+        assert fmt in err, fmt
+
+
 def test_pdf_routing(tmp_path, monkeypatch):
     # pypdf output varies by fixture PDF; assert ROUTING, not extraction.
     run = _mk_legacy_run(tmp_path)
