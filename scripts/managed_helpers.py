@@ -82,3 +82,17 @@ def managed_deepen(*, layout, fs, typed_args):
         _flag(argv, flag, typed_args.get(key))
     with broker_managed_context():
         return {"exit_code": deepen_questions.main(argv)}
+
+
+def managed_ingest_local(*, layout, fs, typed_args):
+    from scripts import ingest_local
+    _guard(layout)
+    files = typed_args["files"]
+    if not isinstance(files, list) or not files:
+        raise ValueError("files must be a non-empty list of paths")
+    argv = ["--run-dir", str(layout.run_root)]
+    for key, flag in (("title", "--title"), ("slug", "--slug"), ("year", "--year")):
+        _flag(argv, flag, typed_args.get(key))
+    argv.extend(str(f) for f in files)
+    with broker_managed_context():
+        return {"exit_code": ingest_local.main(argv)}

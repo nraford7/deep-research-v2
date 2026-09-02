@@ -6,6 +6,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from scripts import ingest_local
 
+import pytest
+from scripts.helper_runtime import (
+    ManagedHelperRequired, broker_managed_context, resolve_helper_layout)
+from scripts.run_transactions import create_skeleton_transaction
+
 
 def _run(run_dir, *args):
     return ingest_local.main(["--run-dir", str(run_dir), *map(str, args)])
@@ -139,3 +144,46 @@ def test_evidence_gate_accepts_local_rows(tmp_path):
     from scripts import evidence_gate
     rows, malformed = evidence_gate._load_slice(run / "round1" / "slice_local.jsonl")
     assert rows and not malformed
+
+
+def _mk_v2_run(tmp_path):
+    # Exactly how tests/test_helper_layouts.py's `v2_run` fixture builds one.
+    library = tmp_path / "research"
+    library.mkdir()
+    return create_skeleton_transaction(library, "topic", question="Q").publish()
+
+
+def test_direct_v2_execution_is_rejected(tmp_path):
+    v2_run = _mk_v2_run(tmp_path)
+    doc = tmp_path / "kb.txt"
+    doc.write_text("content")
+    with pytest.raises(ManagedHelperRequired, match="run_manager invoke-helper"):
+        ingest_local.main(["--run-dir", str(v2_run), str(doc)])
+
+
+def test_helper_is_registered():
+    from scripts.run_manager import MANAGED_HELPERS
+    module, fn, allowed = MANAGED_HELPERS["ingest-local"]
+    assert (module, fn) == ("scripts.managed_helpers", "managed_ingest_local")
+    assert allowed == frozenset({"files", "title", "slug", "year"})
+
+
+def test_managed_adapter_ingests_v2_run(tmp_path):
+    # Broker path end-to-end: inside broker_managed_context the V2 guard
+    # passes and the row lands with the V2 text_path convention.
+    # (broker_managed_context wraps the call here, mirroring how
+    # tests/test_helper_layouts.py exercises scope.managed_scope — _guard's
+    # require_managed_mutation check runs before the adapter's own context.)
+    from scripts.managed_helpers import managed_ingest_local
+    v2_run = _mk_v2_run(tmp_path)
+    layout = resolve_helper_layout(v2_run)
+    doc = tmp_path / "kb.txt"
+    doc.write_text("the fee is 12,500")
+    with broker_managed_context():
+        result = managed_ingest_local(layout=layout, fs=None,
+                                      typed_args={"files": [str(doc)]})
+    assert result["exit_code"] == 0
+    jsonl = layout.round1 / "slice_local.jsonl"
+    (row,) = [json.loads(l) for l in jsonl.read_text().splitlines() if l.strip()]
+    assert row["text_path"].startswith("Sources/Extracted/")
+    assert (layout.run_root / row["text_path"]).is_file()
