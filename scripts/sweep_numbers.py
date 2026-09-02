@@ -36,13 +36,22 @@ def _resolve_text_path(tp: str, layout):
     """Resolve a row's text_path the way background.py:152-163 does:
     V2 rows carry run-root-relative "Sources/..." paths; legacy rows carry
     round1-relative "sources/..." paths; inherited rows were rewritten to
-    run-root-relative by run_extension.py."""
+    run-root-relative by run_extension.py.
+
+    CONTAINMENT (FE4): absolute paths and paths that resolve outside
+    layout.run_root are rejected (None) — a corpus row must never pull
+    arbitrary filesystem content into the evidence haystack."""
     p = Path(tp)
     if p.is_absolute():
-        return p
+        return None
     if tp.startswith("Sources/"):
-        return layout.run_root / tp
-    return layout.round1 / tp
+        candidate = layout.run_root / tp
+    else:
+        candidate = layout.round1 / tp
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(layout.run_root.resolve()):
+        return None
+    return resolved
 
 
 def _iter_row_text(jsonl: Path, layout):
@@ -65,9 +74,11 @@ def _iter_row_text(jsonl: Path, layout):
             yield str(h)
         tp = row.get("text_path")
         if isinstance(tp, str) and tp.strip():
+            resolved = _resolve_text_path(tp, layout)
+            if resolved is None:
+                continue
             try:
-                yield _resolve_text_path(tp, layout).read_text(
-                    encoding="utf-8", errors="replace")
+                yield resolved.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 pass
 
@@ -99,9 +110,11 @@ def _iter_grounding_text(path: Path):
 
 
 def _answer_evidence_block(path: Path) -> str:
-    """ONLY the ## Evidence section of a Round-2.5 answer file. Reading the
-    whole file would let a fabricated number copied from the answer prose
-    into a section support ITSELF."""
+    """ONLY the ">"-quoted snippet lines of the ## Evidence section of a
+    Round-2.5 answer file. Reading the whole file would let a fabricated
+    number copied from the answer prose into a section support ITSELF; the
+    "- url" bullet lines are source pointers, not evidence text — a numeric
+    id in a URL must not support a claim (S1)."""
     text = path.read_text(encoding="utf-8", errors="replace")
     lines, keep, out = text.split("\n"), False, []
     for ln in lines:
@@ -109,19 +122,19 @@ def _answer_evidence_block(path: Path) -> str:
         if stripped.startswith("## "):
             keep = stripped == "## Evidence"
             continue
-        if keep:
+        if keep and stripped.startswith(">"):
             out.append(ln)
     return "\n".join(out)
 
 
 def collect_evidence_text(run_dir: Path) -> str:
+    """Evidence text = corpus rows (text/highlights + the text_path files
+    they reference), Round-2.5 grounding JSON, and answer Evidence snippets.
+    Deliberately NO rglob over Sources/Extracted: a spilled .txt no corpus
+    row references (a stale leftover from a prior run shape) is not
+    retrieved evidence (FE3)."""
     layout = resolve_helper_layout(run_dir, allow_unmanaged=True)
     parts = []
-    src = layout.extracted_sources
-    if src.is_dir():
-        # rglob: inherited full texts live under Sources/Extracted/inherited/.
-        for f in sorted(src.rglob("*.txt")):
-            parts.append(f.read_text(encoding="utf-8", errors="replace"))
     r1 = layout.round1
     if r1.is_dir():
         for jsonl in sorted(r1.glob("slice_*.jsonl")) + [r1 / "inherited_corpus.jsonl"]:
@@ -136,17 +149,48 @@ def collect_evidence_text(run_dir: Path) -> str:
     return numkeys.normalize_haystack("\n".join(parts))
 
 
+_LIST_LINE_RE = __import__("re").compile(r"^(?:[-*+]|\d+[.)])\s")
+
+
+def _iter_paragraphs(text: str):
+    """Yield (first_line_no, paragraph) pairs. Consecutive non-blank,
+    non-heading, non-fence, non-list lines join with a space so a citation
+    wrapped across lines ("[Smith,\\n2020]") is stripped as ONE marker (C3).
+    Fenced blocks and headings are skipped as before; each list line is its
+    own paragraph. Flag line numbers point at the paragraph's first line."""
+    in_fence = False
+    para, para_start = [], 0
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            if para:
+                yield para_start, " ".join(para)
+                para = []
+            in_fence = not in_fence
+            continue
+        if in_fence or not stripped or line.lstrip().startswith("#"):
+            if para:
+                yield para_start, " ".join(para)
+                para = []
+            continue
+        if _LIST_LINE_RE.match(stripped):
+            if para:
+                yield para_start, " ".join(para)
+                para = []
+            yield line_no, line
+            continue
+        if not para:
+            para_start = line_no
+        para.append(stripped)
+    if para:
+        yield para_start, " ".join(para)
+
+
 def sweep(sections_dir: Path, norm_haystack: str):
     flags, supported = [], []
     for f in sorted(sections_dir.rglob("*.md")):
         text = f.read_text(encoding="utf-8", errors="replace")
-        in_fence = False
-        for line_no, line in enumerate(text.splitlines(), start=1):
-            if line.strip().startswith("```"):
-                in_fence = not in_fence
-                continue
-            if in_fence or line.lstrip().startswith("#"):
-                continue
+        for line_no, line in _iter_paragraphs(text):
             for sent in _split_sentences(line):
                 clean = numkeys.strip_nonclaims(sent)
                 for claim in numkeys.extract_claims(clean):

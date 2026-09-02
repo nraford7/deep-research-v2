@@ -7,11 +7,21 @@ a claim passes if its normalized number appears (boundary-guarded, unit-aware)
 anywhere in the evidence text.
 """
 
+import decimal
 import re
 
-# Bracketed spans that are NOT claims: citation markers, metadata tags,
-# footnotes. Stripped before number extraction.
-_MARKER_RE = re.compile(r"\[[^\]]{0,200}\]\([^)\s]{0,500}\)|\[[^\]]{0,200}\]|\[\^[^\]]{1,20}\]")
+# Markdown structure around bracketed spans. Links keep their visible LABEL
+# (only the (url) part is dropped); footnote markers vanish; a plain
+# bracketed span is stripped ONLY when citation-ish or metadata (see
+# _bracket_repl) — other bracketed prose keeps its text, brackets removed.
+_LINK_RE = re.compile(r"\[([^\]]{0,200})\]\(([^)\s]{0,500})\)")
+_FOOTNOTE_RE = re.compile(r"\[\^[^\]]{1,20}\]")
+_BRACKET_RE = re.compile(r"\[([^\]]{0,200})\]")
+_META_PREFIXES = ("as of:", "confidence:", "disputed:", "unverified", "r2.5-")
+_KB_CITE_SHAPE_RE = re.compile(
+    r"kb:[a-z0-9][a-z0-9-]*\s*,\s*(?:\d{4}[a-z]?|n\.d\.)", re.IGNORECASE)
+_CITE_YEAR_RE = re.compile(
+    r",\s*(?:\d{4}[a-z]?(?![0-9a-z])|n\.d\.)", re.IGNORECASE)
 _PAREN_CITE_RE = re.compile(r"\(\s*[A-Za-z][^()]{0,80},\s*(?:\d{4}[a-z]?|n\.d\.)\s*\)")
 
 _CURRENCY_BEFORE = r"(?:US?\$|USD|EUR|GBP|€|£|\$)"
@@ -35,24 +45,44 @@ _SECTION_REF_RE = re.compile(
     r"footnote|note|page|p\.|pp\.)\s*\d+(?:\.\d+)*", re.IGNORECASE)
 
 
+def _bracket_repl(m: re.Match) -> str:
+    """Strip a plain bracketed span only when it is citation-ish or metadata;
+    otherwise it is visible prose — keep the text, drop the brackets."""
+    inner = m.group(1).strip()
+    low = inner.lower()
+    if low.startswith(_META_PREFIXES):
+        return " "
+    if _KB_CITE_SHAPE_RE.match(inner):
+        return " "
+    if _CITE_YEAR_RE.search(inner):
+        return " "
+    return f" {inner} "
+
+
 def strip_nonclaims(sentence: str) -> str:
-    """Remove bracketed citation/metadata/footnote/link spans, parenthetical
-    APA cites, and structural references (Section 2.5, Table 3) so their
-    years/numbers are never claims."""
-    out = _MARKER_RE.sub(" ", sentence)
+    """Remove citation/metadata spans WITHOUT deleting visible text: markdown
+    link labels survive (only the (url) part is dropped), footnote markers
+    [^x] vanish, bracketed spans are stripped only when citation-ish or
+    metadata (metadata prefix, kb-cite shape, or a comma-year/n.d. tail) —
+    other bracketed prose keeps its text so its numbers stay claims.
+    Parenthetical APA cites and structural references (Section 2.5, Table 3)
+    are removed as before."""
+    out = _LINK_RE.sub(r" \1 ", sentence)
+    out = _FOOTNOTE_RE.sub(" ", out)
+    out = _BRACKET_RE.sub(_bracket_repl, out)
     out = _PAREN_CITE_RE.sub(" ", out)
     return _SECTION_REF_RE.sub(" ", out)
 
 
 def _canonical(num: str, scale: str | None) -> str:
+    """Decimal, not float: 1.07 * 1e9 in float leaves artifacts
+    ("1070000000.0000001"). Also strips trailing decimal zeros
+    ("2.20" → "2.2") so spellings normalize to one key."""
     plain = num.replace(",", "")
+    val = decimal.Decimal(plain)
     if scale:
-        mult = _SCALE[scale.lower()]
-        val = float(plain) * mult
-        if val == int(val):
-            return str(int(val))
-        return repr(val)
-    return plain
+        val *= _SCALE[scale.lower()]
+    return format(val.normalize(), "f")
 
 
 def extract_claims(sentence: str) -> list[dict]:
@@ -84,24 +114,33 @@ def normalize_haystack(text: str) -> str:
 _UNIT_WINDOW = 16  # chars of context checked for %/currency markers
 
 
+_LETTER_SUFFIXES = ("k", "m", "bn", "b")
+
+
 def _match_positions(key: str, hay: str):
-    for m in re.finditer(rf"(?<![\d.]){re.escape(key)}(?![\d.])", hay):
+    # Trailing boundary: a digit-ending key tolerates a sentence-final period
+    # ("...employs 175,000.") but not a digit or decimal continuation; a
+    # letter-ending key (175k) must not continue into a unit (175kg).
+    tail = r"(?![a-z0-9])" if key[-1].isalpha() else r"(?!\d|\.\d)"
+    for m in re.finditer(rf"(?<![\d.]){re.escape(key)}{tail}", hay):
         yield m.start(), m.end()
 
 
 def _expanded_alternates(claim: dict):
     """Also try the scale-suffixed spellings of an expanded key
-    (175000 -> 175k / 175 thousand; 5400000 -> 5.4 million)."""
+    (2500 -> 2.5k / 2.5 thousand; 5400000 -> 5.4m / 5.4 million)."""
     key = claim["key"]
     alts = []
-    if "." not in key and key.endswith("000"):
+    if key.isdigit() and int(key) >= 1000:
         for suffix, mult in (("k", 1_000), ("thousand", 1_000),
-                             ("million", 1_000_000), ("bn", 1_000_000_000),
+                             ("m", 1_000_000), ("million", 1_000_000),
+                             ("bn", 1_000_000_000), ("b", 1_000_000_000),
                              ("billion", 1_000_000_000)):
             val = int(key) / mult
             if val >= 1 and (val == int(val) or round(val, 2) == val):
                 base = str(int(val)) if val == int(val) else str(round(val, 2))
-                alts.append(f"{base}{suffix}" if suffix == "k" else f"{base} {suffix}")
+                alts.append(f"{base}{suffix}" if suffix in _LETTER_SUFFIXES
+                            else f"{base} {suffix}")
     return alts
 
 

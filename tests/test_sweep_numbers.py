@@ -32,10 +32,24 @@ mandatory payment, US$119,083, came from Nunhems B.V.
 """
 
 
+def _index_local_txt(run, name):
+    """A slice_local.jsonl row the way ingest_local writes it for a legacy
+    layout: text_path is round1-relative 'sources/<f>'. FE3: only indexed
+    files count as evidence."""
+    row = {"title": name, "url": f"file://kb/{name}", "slice": "local",
+           "tier": "user-provided", "origin": "user-provided",
+           "kb_slug": Path(name).stem.replace("_", "-"),
+           "text_path": f"sources/{name}"}
+    jsonl = run / "round1" / "slice_local.jsonl"
+    with jsonl.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
 def test_fabricated_numbers_flag_supported_pass(tmp_path):
     run = _mk_run(tmp_path)
     (run / "sections" / "ii.md").write_text(SMTA_SECTION)
     (run / "round1" / "sources" / "local_abc.txt").write_text(CORPUS)
+    _index_local_txt(run, "local_abc.txt")
     out = tmp_path / "sweep.md"
     rc = sweep_numbers.main(["--run-dir", str(run), "--output", str(out)])
     assert rc == 1
@@ -126,3 +140,51 @@ def test_grounding_urls_do_not_support_claims(tmp_path):
                                   "highlights": ["no relevant numbers"]}]}))
     out = tmp_path / "sweep.md"
     assert sweep_numbers.main(["--run-dir", str(run), "--output", str(out)]) == 1
+
+
+def test_answer_evidence_url_bullets_do_not_support(tmp_path):
+    # S1 regression: "- url" bullet lines inside ## Evidence are NOT evidence
+    # text — a numeric id in the URL must not support a claim. Only the
+    # ">"-quoted snippet lines count.
+    run = _mk_run(tmp_path)
+    (run / "sections" / "s.md").write_text("Cuts hit 175,000 staff.")
+    (run / "round2_5" / "answer_00_gap.md").write_text(
+        "# Round-2.5 answer\n\nprose\n\n## Evidence\n\n"
+        "- https://x.org/reports/175000-staff-cuts\n"
+        "  > nothing numeric in the actual snippet\n\n## Sources\n\n- x\n")
+    out = tmp_path / "sweep.md"
+    assert sweep_numbers.main(["--run-dir", str(run), "--output", str(out)]) == 1
+
+
+def test_stale_unindexed_txt_does_not_support(tmp_path):
+    # FE3 regression: a spilled .txt under sources/ that NO corpus row
+    # references (a stale leftover) is not evidence.
+    run = _mk_run(tmp_path)
+    (run / "sections" / "s.md").write_text("Enrollment hit 48,217 students.")
+    (run / "round1" / "sources" / "stale_leftover.txt").write_text(
+        "district enrollment of 48,217 students")
+    out = tmp_path / "sweep.md"
+    assert sweep_numbers.main(["--run-dir", str(run), "--output", str(out)]) == 1
+
+
+def test_escaping_text_path_is_rejected(tmp_path):
+    # FE4 regression: a text_path that resolves outside the run root must be
+    # skipped — files beyond the run are never evidence.
+    run = _mk_run(tmp_path)
+    (tmp_path / "outside.txt").write_text("district enrollment of 48,217 students")
+    (run / "sections" / "s.md").write_text("Enrollment hit 48,217 students.")
+    row = {"url": "https://x.org/a", "tier": "web",
+           "text_path": "../../outside.txt"}
+    (run / "round1" / "slice_web.jsonl").write_text(json.dumps(row) + "\n")
+    out = tmp_path / "sweep.md"
+    assert sweep_numbers.main(["--run-dir", str(run), "--output", str(out)]) == 1
+
+
+def test_wrapped_citation_year_not_a_claim(tmp_path):
+    # C3 regression: a citation wrapped across a line break ("[Smith,\n2020]")
+    # must be joined and stripped as ONE marker — its year is not a claim.
+    run = _mk_run(tmp_path)
+    (run / "sections" / "s.md").write_text(
+        "Receipts fell sharply [Smith,\n2020] across the board.\n")
+    out = tmp_path / "sweep.md"
+    assert sweep_numbers.main(["--run-dir", str(run), "--output", str(out)]) == 0
