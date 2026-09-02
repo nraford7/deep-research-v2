@@ -1,0 +1,93 @@
+# tests/test_kb_cites.py
+import json
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts import verify_citations as vc
+
+
+def test_kb_cite_parses():
+    (c,) = vc.extract_kb_cites("as the contract states [kb:acme-contract-v2, 2024].")
+    assert c == {"slug": "acme-contract-v2", "year": "2024", "kind": "kb"}
+
+def test_kb_nd_parses():
+    (c,) = vc.extract_kb_cites("per the memo [kb:board-memo, n.d.] the fee...")
+    assert c["year"] == "n.d."
+
+def test_kb_without_year_is_not_a_cite():
+    assert vc.extract_kb_cites("[kb:board-memo]") == []
+
+def test_kb_cite_untouched_by_academic_regex():
+    assert vc.extract_inline_cites("[kb:acme-contract-v2, 2024]") == []
+
+
+def test_incident_fixture_is_flagged_unparseable():
+    text = ("The fund collected 2.2% of receipts [FAO Co-Chairs background "
+            "document, 2018; this run's deepening analysis].")
+    flags = vc.find_unparseable_cites(text)
+    assert len(flags) == 1 and "Co-Chairs" in flags[0]
+
+def test_metadata_tags_not_flagged():
+    for ok in ("[as of: 2026-09-02]", "[confidence: high, 2020 data]",
+               "[disputed: 40% vs 60%, 2019]", "[UNVERIFIED — 2021 figure]",
+               "[r2.5-A07, 2024]"):
+        assert vc.find_unparseable_cites(f"x {ok} y") == [], ok
+
+def test_valid_cites_not_flagged():
+    text = "a [Smith, 2020] b (Jones et al., 2021) c [treasury.gov, 2024] d [kb:memo, n.d.]"
+    assert vc.find_unparseable_cites(text) == []
+
+def test_markdown_links_and_footnotes_not_flagged():
+    text = "see [the 2019 report](https://x.org/r) and a note[^1] plus [^2019note]."
+    assert vc.find_unparseable_cites(text) == []
+
+def test_code_fences_excluded():
+    text = "```\n[weird thing, 2020]\n```\nand `[inline, 2020]` too"
+    assert vc.find_unparseable_cites(text) == []
+
+
+def _manifest(tmp_path, rows):
+    p = tmp_path / "slice_local.jsonl"
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return p
+
+def test_kb_resolution(tmp_path):
+    p = _manifest(tmp_path, [
+        {"kb_slug": "acme-contract-v2", "year": 2024, "url": "file:///x", "tier": "user-provided"},
+        {"kb_slug": "board-memo", "url": "file:///y", "tier": "user-provided"},
+    ])
+    manifest = vc.load_kb_manifest([p])
+    known, unknown, mismatch, unchecked = vc.check_kb_cites(
+        [{"slug": "acme-contract-v2", "year": "2024", "kind": "kb"},   # known
+         {"slug": "acme-contract-v2", "year": "2099", "kind": "kb"},   # mismatch
+         {"slug": "acme-contract-v2", "year": "n.d.", "kind": "kb"},   # mismatch: row HAS a year
+         {"slug": "board-memo", "year": "n.d.", "kind": "kb"},         # known
+         {"slug": "board-memo", "year": "2020", "kind": "kb"},         # unchecked: row has no year
+         {"slug": "ghost-doc", "year": "2020", "kind": "kb"}],         # unknown
+        manifest)
+    assert [c["slug"] for c in unknown] == ["ghost-doc"]
+    assert [(c["slug"], c["year"]) for c in mismatch] == [
+        ("acme-contract-v2", "2099"), ("acme-contract-v2", "n.d.")]
+    assert [(c["slug"], c["year"]) for c in unchecked] == [("board-memo", "2020")]
+    assert len(known) == 2
+
+
+def test_pre1800_malformed_cite_is_still_flagged():
+    assert vc.find_unparseable_cites("x [Archive note, 1776; analysis] y")
+
+
+def test_fail_on_exit_codes(tmp_path):
+    import subprocess
+    md = tmp_path / "sec.md"
+    md.write_text("A claim [kb:ghost, 2020] and junk [FAO backgrounder thing, 2018; x].")
+    base = [sys.executable, str(ROOT / "scripts" / "verify_citations.py"), str(md),
+            "--output", str(tmp_path / "r.md")]
+    env_ok = subprocess.run(base, capture_output=True, text=True, cwd=str(ROOT))
+    assert env_ok.returncode == 0          # default behavior unchanged
+    strict = subprocess.run(base + ["--fail-on", "kb-unknown,unparseable"],
+                            capture_output=True, text=True, cwd=str(ROOT))
+    assert strict.returncode == 1
+    report = json.loads((tmp_path / "r.json").read_text())
+    assert report["kb_unknown"] and report["unparseable_cites"]
