@@ -324,9 +324,81 @@ def _collect_sources(payload):
     return sources
 
 
-def _write_answer(path, question, answer, sources):
+def _collect_evidence(payload):
+    """Gather ALL textual evidence in the response: results[].highlights,
+    results[].text when present, plus any string content inside
+    output.grounding (tolerant — Exa's grounding is answer-wide citation
+    metadata, not guaranteed snippets; highlights are the dependable text
+    carrier, which is why contents.highlights is requested)."""
+    evidence = []
+    if not isinstance(payload, dict):
+        return evidence
+    for raw in payload.get("results") or []:
+        if not isinstance(raw, dict):
+            continue
+        snippets = [str(h) for h in (raw.get("highlights") or []) if h]
+        text = raw.get("text")
+        if isinstance(text, str) and text.strip():
+            snippets.append(text.strip())
+        if snippets:
+            evidence.append({"url": (raw.get("url") or "").strip(), "snippets": snippets})
+    output = payload.get("output")
+    if isinstance(output, dict) and output.get("grounding") is not None:
+        def _strings(node):
+            if isinstance(node, str) and node.strip():
+                yield node.strip()
+            elif isinstance(node, dict):
+                for v in node.values():
+                    yield from _strings(v)
+            elif isinstance(node, list):
+                for v in node:
+                    yield from _strings(v)
+        snippets = list(_strings(output["grounding"]))
+        if snippets:
+            evidence.append({"url": "(grounding)", "snippets": snippets})
+    return evidence
+
+
+UNVERIFIED_MARK = "[UNVERIFIED — not in retrieved evidence]"
+
+
+def _mark_unverified(answer, evidence_text):
+    """Prefix every sentence containing ANY quantity the evidence text does
+    not support — one fabricated number marks the sentence even when its
+    neighbors are supported. Empty evidence ⇒ every quantity sentence is
+    marked (fail-safe, not fail-open)."""
+    from scripts import numkeys
+    from scripts.lint_background import _split_sentences
+    norm = numkeys.normalize_haystack(evidence_text or "")
+    out_lines = []
+    for line in answer.split("\n"):
+        if not line.strip():
+            out_lines.append(line)
+            continue
+        rebuilt = []
+        for sent in _split_sentences(line):
+            claims = numkeys.extract_claims(numkeys.strip_nonclaims(sent))
+            if claims and (not norm or any(
+                    not numkeys.claim_supported(c, norm) for c in claims)):
+                rebuilt.append(f"{UNVERIFIED_MARK} {sent.strip()}")
+            else:
+                rebuilt.append(sent.strip())
+        out_lines.append(" ".join(rebuilt))
+    return "\n".join(out_lines)
+
+
+def _write_answer(path, question, answer, sources, evidence):
     lines = [f"# Round-2.5 answer", "", f"**Question:** {question}", "", answer.rstrip(), ""]
-    lines += ["## Sources", ""]
+    lines += ["## Evidence", ""]
+    if evidence:
+        for e in evidence:
+            lines.append(f"- {e['url'] or 'source'}")
+            for s in e["snippets"]:
+                snippet = s if len(s) <= 1500 else s[:1500] + " …[truncated]"
+                lines.append(f"  > {snippet}")
+    else:
+        lines.append("_(no evidence returned)_")
+    lines += ["", "## Sources", ""]
     if sources:
         for url, title in sources:
             lines.append(f"- {title or 'source'} — {url}")
@@ -373,7 +445,16 @@ def run_question(idx, bucket, question, session, api_key, ledger, round25_dir):
 
     answer = _extract_answer(payload)
     sources = _collect_sources(payload)
-    _write_answer(answer_path, question, answer, sources)
+    evidence = _collect_evidence(payload)
+    (round25_dir / f"grounding_{idx:02d}.json").write_text(
+        json.dumps({"results": payload.get("results"),
+                    "grounding": (payload.get("output") or {}).get("grounding")
+                    if isinstance(payload.get("output"), dict) else None},
+                   ensure_ascii=False, indent=2),
+        encoding="utf-8")
+    evidence_text = "\n".join(s for e in evidence for s in e["snippets"])
+    answer = _mark_unverified(answer, evidence_text)
+    _write_answer(answer_path, question, answer, sources, evidence)
     return True
 
 
