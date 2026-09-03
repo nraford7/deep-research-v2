@@ -71,7 +71,9 @@ export const meta = {
 //     retrievalConcurrency: 3,                        // optional — max Exa-hitting runs at once (default 3; "chunks of N")
 //   }
 // (Every Bash stage also `source ~/.env` for EXA/OPENAI/XAI/etc keys — home-relative, not embedded here.)
-const cfg = (args && typeof args === 'object' && !Array.isArray(args)) ? args : { questions: args }
+let _args = args
+if (typeof _args === 'string') { try { _args = JSON.parse(_args) } catch (_e) { /* leave as string → questions fallback */ } }
+const cfg = (_args && typeof _args === 'object' && !Array.isArray(_args)) ? _args : { questions: _args }
 const PROJECT = cfg.project
 const REPO    = cfg.repo
 if (!PROJECT || !REPO) {
