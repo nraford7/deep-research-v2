@@ -29,6 +29,10 @@
 //   • LINT (fenced background w/ uncited quantities) — writers put every number
 //     in an in-sentence citation and use NO editorial fences; the adversary stage
 //     then loops verify+lint→remediate until lint_background exits 0.
+//   • NUMBER SWEEP + STRICT CITES (grounding gates, 2026-09) — the adversary stage
+//     also loops sweep_numbers.py (every number must exist in retrieved evidence)
+//     and verify_citations.py --fail-on kb-unknown,unparseable (unknown [kb:slug]
+//     cites and unparseable citation shapes) until both exit 0, fail-closed.
 //
 // v4 — structured RESEARCH-GUIDE briefs (AUGMENT, never replace):
 //   • accepts args.guideFile (a RESEARCH-GUIDE-*.md parsed into per-sprint briefs) OR a
@@ -335,10 +339,20 @@ const results = await pipeline(
           add an in-sentence [source, YYYY] for the bare quantity. Re-run lint_background until it exits 0.
           (Do not silence by deleting real evidence — cite it.)
 
-       4. python3 scripts/verify_citations.py ${runDirOf(q)}/sections/ --output ${runDirOf(q)}/round4/citation-verification.md
-          (OpenAlex may hang → watchdog; orphaned/weak-title cites are EXPECTED for canonical author-year works, non-fatal.)
+       4. NUMBER-PROVENANCE SWEEP (fail-closed). Every number in the sections must exist somewhere
+          in the retrieved evidence (existence tripwire, not source binding):
+            python3 scripts/sweep_numbers.py --run-dir ${runDirOf(q)} --output ${runDirOf(q)}/round4/number-sweep.md
+          For EACH flag: grep round1/sources/ for the true figure and correct the number, or add the
+          citing source, or cut the claim. NEVER delete the flag by weakening the sentence to a vaguer
+          quantity — fix the number or cut it. Re-run until exit 0.
 
-       5. If ANY section changed in steps 1-3, RE-ASSEMBLE ${runDirOf(q)}/RESEARCH-REPORT_${q.slug}.md
+       5. python3 scripts/verify_citations.py ${runDirOf(q)}/sections/ --output ${runDirOf(q)}/round4/citation-verification.md --fail-on kb-unknown,unparseable
+          (OpenAlex may hang → watchdog; orphaned/weak-title cites are EXPECTED for canonical author-year works, non-fatal.
+          The two FAIL-CLOSED classes are different: an unknown [kb:slug] cite or an unparseable citation-ish
+          bracket (the fabricated-"background document" shape) exits 1 — reattribute to a real source or cut,
+          then re-run until exit 0.)
+
+       6. If ANY section changed in steps 1-5, RE-ASSEMBLE ${runDirOf(q)}/RESEARCH-REPORT_${q.slug}.md
           (re-concat field map + sections + bibliography) so the markdown Source reflects the cleaned sections.
        Return {written:${JSON.stringify(s.written)}, note:''}`,
       { label: `adv:${q.slug}`, phase: 'Adversary', schema: SECTIONS }
