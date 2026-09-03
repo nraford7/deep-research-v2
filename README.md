@@ -9,12 +9,17 @@ Most LLM research is one model, one pass, hallucinated citations. This is retrie
 ```
 Round 0    Domain scoping — classify topic, propose source priorities
 Round 1    Exa retrieval slices + a free OpenAlex/Semantic Scholar academic anchor
+             + optional local KB ingestion (your own PDFs/docs join the evidence store)
              → evidence gate: MUST pass before any synthesis (thin corpus is refused)
 Round 2    Synthesis over the fetched corpus — six exact question-bucket headers
-Round 2.5  Question-driven deepening — root-cause / consequence / gap (Exa deep-reasoning)
+Round 2.5  Question-driven deepening — root-cause / consequence / gap (Exa deep-reasoning);
+             retrieved evidence is kept with each answer, and any quantity the evidence
+             does not support arrives pre-marked [UNVERIFIED]
 Round 3    Section planners + reconciler → slot-batched isolated integration agents + dedup bibliography
 Round 4    Mechanical citation verification (Crossref/OpenAlex) + three-state SSRF-hardened
-             link probe + a refute-mode adversary on a different provider family + fix pass
+             link probe + number-provenance sweep (every number checked against retrieved
+             evidence) + unverifiable-citation-shape detector + a refute-mode adversary
+             on a different provider family + fix pass
 Round 5    (optional) Targeted rerun of a single slice or question, then re-integrate
 Index      Refresh a project-wide semantic index over every topic's Bible (bundled)
 Output     Hub-and-spoke Research Bible (Markdown + self-contained HTML) + BibTeX
@@ -124,7 +129,10 @@ See `SKILL.md` for the full architecture, prompt templates, and failure modes.
 
 - **Retrieval-first** — Round 1 fetches a real evidence corpus with Exa search slices (plus a free OpenAlex-first academic anchor with automatic Semantic Scholar fallback); later rounds reason over the fetched evidence, not the model's memory
 - **Hard evidence gate** — synthesis is refused (exit 22) unless the corpus clears minimum unique-source and non-empty-slice thresholds and every row re-validates
-- **Question-driven deepening** — root-cause / consequence / gap questions (3/3/3, cap 9) chased with Exa `deep-reasoning`
+- **Question-driven deepening** — root-cause / consequence / gap questions (3/3/3, cap 9) chased with Exa `deep-reasoning`; each answer keeps its retrieved evidence (`## Evidence` + raw grounding JSON), and any quantity sentence the evidence does not support is pre-marked `[UNVERIFIED — not in retrieved evidence]` before integration can copy it
+- **Local KB ingestion** — `ingest_local.py` puts your own documents (PDF/HTML/text) into the evidence store with a citable `[kb:slug, year]` handle; the verifier resolves those cites against the ingested manifest, so a false claim about *your* documents is now checkable
+- **Number-provenance sweep** — a Round-4 tripwire (`sweep_numbers.py`): every number in the report is searched (boundary-guarded, unit-aware) across all retrieved evidence — Exa text, highlights, KB documents, deepening evidence; a number found nowhere is flagged. Existence check, not source binding — the adversary still owns attribution
+- **Unverifiable-citation-shape detector** — bracketed cite-ish spans that match no known grammar (the classic fabricated "background document" shape) are hard-flagged instead of invisible; `--fail-on kb-unknown,unparseable` makes the gate exit non-zero
 - **Ledger-capped retrieval** — a per-run money ledger (default $1) pre-charges each Exa call and reconciles the actual; a cap breach exits 21, never silently retries
 - **Domain scoping** — classifies topic before Round 1, injects domain-specific source priorities (PubMed for medicine, NBER for economics, arXiv for tech, etc.)
 - **Date stamping** — every time-sensitive claim carries `[as of: <date>]`
@@ -203,6 +211,10 @@ python3 dispatch.py --topic "$TOPIC" \
 # 3. Round 1 retrieval — Exa slices + free academic anchor
 python3 scripts/slice_search.py --run-dir "$RUN" --topic "$TOPIC" --max-retrieval-usd 1
 
+# 3a. (Optional) Ingest your own documents into the evidence store — cite them
+#     as [kb:client-memo, 2024]; empty extraction (scanned PDF) is a hard failure
+python3 scripts/ingest_local.py --run-dir "$RUN" --year 2024 client-memo.pdf
+
 # 4. Evidence gate — MUST exit 0 before any synthesis (exit 22 = thin corpus)
 python3 scripts/evidence_gate.py --run-dir "$RUN"
 
@@ -243,6 +255,14 @@ python3 scripts/lit_search.py --topic "CBDC monetary policy" --limit 50 \
 # Background-block lint: numeric tripwire inside fenced editorial blocks; exit 0 = clean,
 # exit 1 = a fenced block names a quantity (fix/re-fence it) before the refute adversary.
 python3 scripts/lint_background.py "$RUN/sections/"
+# Number-provenance sweep: every number in the sections must exist somewhere in the
+# retrieved evidence (Exa text/highlights, KB docs, deepening evidence). Exit 1 = at
+# least one number appears nowhere — cite it, correct it, or cut it before the adversary.
+python3 scripts/sweep_numbers.py --run-dir "$RUN" --output "$RUN/round4/number-sweep.md"
+# Strict citation gate: unknown [kb:slug] cites and unparseable citation shapes
+# (the fabricated-"background document" class) exit non-zero.
+python3 scripts/verify_citations.py "$RUN/sections/" \
+  --output "$RUN/round4/citation-verification.md" --fail-on kb-unknown,unparseable
 
 # 8. Export + refresh the project-wide semantic index (bundled; over every topic's Bible)
 python3 scripts/export.py --sections "$RUN/sections/" \
@@ -421,9 +441,12 @@ per line or `existing-slug<TAB>question` to resume exact named run directories.
 | `scripts/citation_chase.py` | Post-gate one-hop citation-graph fill with a tested OpenAlex → Semantic Scholar cascade. If both providers fail, writes `citation_chase_status.json` with `graph_verified=false` and continues in explicit degraded mode; exit 22 remains fail-closed. |
 | `scripts/coverage_audit.py` | Single-model **fallback** coverage auditor (the default is the bundled squad procedure in `references/squad-audit.md`): name expected-but-absent coverage, fill each gap with a scope-bounded Exa slice, re-gate. Fail-closed: exit 0 = coverage verified, nonzero (30/31/32/21/22) = unverified, do not synthesize |
 | `scripts/lint_background.py` | Round-4 numeric tripwire inside fenced editorial blocks: exit 0 clean, exit 1 if a fenced block names a quantity |
-| `scripts/deepen_questions.py` | Round 2.5 deepening: root-cause / consequence / gap questions answered with Exa deep-reasoning |
+| `scripts/deepen_questions.py` | Round 2.5 deepening: root-cause / consequence / gap questions answered with Exa deep-reasoning; keeps retrieved evidence with each answer and pre-marks unsupported quantities `[UNVERIFIED]` |
+| `scripts/ingest_local.py` | Ingest your own documents (PDF/HTML/text) into the evidence store with citable `[kb:slug, year]` handles; empty extraction is a hard failure |
+| `scripts/sweep_numbers.py` | Round-4 number-provenance sweep: flags any number in the report that appears nowhere in retrieved evidence (existence tripwire; exit 1 on flags) |
+| `scripts/numkeys.py` | Shared number-claim matcher: Decimal-exact, boundary-guarded, unit-aware (`%`, currency, k/million/billion) |
 | `scripts/cost.py` | Cost estimator + retrieval fee table |
-| `scripts/verify_citations.py` | Resolve every citation against OpenAlex + Crossref; flag unresolved / weak matches / orphans; `--check-urls` runs a three-state SSRF-hardened link probe |
+| `scripts/verify_citations.py` | Resolve every citation against OpenAlex + Crossref; flag unresolved / weak matches / orphans; resolves `[kb:slug, year]` cites against ingested local documents; flags unverifiable citation shapes; `--check-urls` runs a three-state SSRF-hardened link probe; `--fail-on kb-unknown,unparseable` exits non-zero on hard flags |
 | `scripts/dedup_bib.py` | DOI-normalized + fuzzy-title bibliography merge with audit log |
 | `scripts/classify_sources.py` | Tier classifier (peer-reviewed / institutional / book / news / blog / wiki) + quality score |
 | `scripts/lit_search.py` | Query OpenAlex + Semantic Scholar; optionally compare against finished bibliography to flag missing canonical works |
@@ -465,6 +488,38 @@ python3 tests/test_parsers.py
 # or
 python3 -m pytest tests/
 ```
+
+## Grounding gates (2026-09)
+
+Hardening after a real incident: a Round-2.5 deepening call fabricated specific figures
+decorating a true qualitative point, attached a plausible fake citation ("FAO Co-Chairs
+background document, 2018"), and the numbers rode through integration into the final
+report — past the citation verifier (wrong shape, so invisible), the lint (cited and
+unfenced, so out of scope), and the adversary (the qualitative conclusion was correct).
+Root cause: grounding was only enforced at retrieval and at external-academic-citation
+shape; everything between was trusted LLM output, and Exa's claim-level evidence was
+being discarded at the moment it existed.
+
+Four mechanical gates close the class (LLM review had already missed it twice — only
+mechanical checks can't be sweet-talked):
+
+- **Evidence retention** — deepening answers now carry their retrieved evidence, and any
+  quantity sentence the evidence does not support is pre-marked
+  `[UNVERIFIED — not in retrieved evidence]` at write time, before integration reads it.
+  Missing evidence marks everything (fail-safe, not fail-open).
+- **Number-provenance sweep** — `sweep_numbers.py` flags any number in the report that
+  appears nowhere in retrieved evidence. The incident's fabricated figures (2.2%,
+  US$175k, 930, >100,000) are the fixture test; the corpus-supported figures pass.
+- **Unverifiable-citation-shape detection** — a bracketed cite-ish span that matches no
+  known grammar is now a hard flag instead of invisible. Unparseable used to mean
+  unchecked; now it means flagged.
+- **Local KB ingestion** — your own documents join the evidence store with citable
+  `[kb:slug, year]` handles, so claims about client documents are checkable by the same
+  machinery instead of living outside every gate.
+
+The sweep is an existence check, not source binding: a flagged number appears nowhere in
+evidence; a passing number may still be misattributed — the refute adversary keeps
+attribution duty.
 
 ## Recent reliability fixes (2026-06)
 
