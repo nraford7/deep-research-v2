@@ -1,0 +1,171 @@
+# tests/test_kb_cites.py
+import json
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts import verify_citations as vc
+
+
+def test_kb_cite_parses():
+    (c,) = vc.extract_kb_cites("as the contract states [kb:acme-contract-v2, 2024].")
+    assert c == {"slug": "acme-contract-v2", "year": "2024", "kind": "kb"}
+
+def test_kb_nd_parses():
+    (c,) = vc.extract_kb_cites("per the memo [kb:board-memo, n.d.] the fee...")
+    assert c["year"] == "n.d."
+
+def test_kb_without_year_is_not_a_cite():
+    assert vc.extract_kb_cites("[kb:board-memo]") == []
+
+def test_kb_cite_untouched_by_academic_regex():
+    assert vc.extract_inline_cites("[kb:acme-contract-v2, 2024]") == []
+
+
+def test_incident_fixture_is_flagged_unparseable():
+    text = ("The fund collected 2.2% of receipts [FAO Co-Chairs background "
+            "document, 2018; this run's deepening analysis].")
+    flags = vc.find_unparseable_cites(text)
+    assert len(flags) == 1 and "Co-Chairs" in flags[0]
+
+def test_metadata_tags_not_flagged():
+    for ok in ("[as of: 2026-09-02]", "[confidence: high, 2020 data]",
+               "[disputed: 40% vs 60%, 2019]", "[UNVERIFIED — 2021 figure]",
+               "[r2.5-A07, 2024]"):
+        assert vc.find_unparseable_cites(f"x {ok} y") == [], ok
+
+def test_valid_cites_not_flagged():
+    text = "a [Smith, 2020] b (Jones et al., 2021) c [treasury.gov, 2024] d [kb:memo, n.d.]"
+    assert vc.find_unparseable_cites(text) == []
+
+def test_markdown_links_and_footnotes_not_flagged():
+    text = "see [the 2019 report](https://x.org/r) and a note[^1] plus [^2019note]."
+    assert vc.find_unparseable_cites(text) == []
+
+def test_code_fences_excluded():
+    text = "```\n[weird thing, 2020]\n```\nand `[inline, 2020]` too"
+    assert vc.find_unparseable_cites(text) == []
+
+def test_case_variant_nd_is_flagged_unparseable():
+    # FE7: uppercase N.D. is citation-ish but matches no grammar → flag.
+    flags = vc.find_unparseable_cites("per the site [site, N.D.] the fee...")
+    assert len(flags) == 1 and "N.D." in flags[0]
+
+def test_suffixed_year_is_flagged_unparseable():
+    # FE7: a suffixed year (2020a) behind a semicolon is unparseable.
+    flags = vc.find_unparseable_cites("x [Smith; 2020a] y")
+    assert len(flags) == 1 and "2020a" in flags[0]
+
+def test_citeish_markdown_link_is_flagged():
+    # FE8: a semicolon+year label hiding inside a markdown link is a
+    # malformed citation, not a link — flag it.
+    flags = vc.find_unparseable_cites(
+        "see [Invented Source; 2020](https://example.com) for details")
+    assert len(flags) == 1 and "Invented Source" in flags[0]
+
+
+def _manifest(tmp_path, rows):
+    p = tmp_path / "slice_local.jsonl"
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return p
+
+def test_kb_resolution(tmp_path):
+    p = _manifest(tmp_path, [
+        {"kb_slug": "acme-contract-v2", "year": 2024, "url": "file:///x", "tier": "user-provided"},
+        {"kb_slug": "board-memo", "url": "file:///y", "tier": "user-provided"},
+    ])
+    manifest, duplicates = vc.load_kb_manifest([p])
+    assert duplicates == []
+    known, unknown, mismatch, unchecked = vc.check_kb_cites(
+        [{"slug": "acme-contract-v2", "year": "2024", "kind": "kb"},   # known
+         {"slug": "acme-contract-v2", "year": "2099", "kind": "kb"},   # mismatch
+         {"slug": "acme-contract-v2", "year": "n.d.", "kind": "kb"},   # mismatch: row HAS a year
+         {"slug": "board-memo", "year": "n.d.", "kind": "kb"},         # known
+         {"slug": "board-memo", "year": "2020", "kind": "kb"},         # unchecked: row has no year
+         {"slug": "ghost-doc", "year": "2020", "kind": "kb"}],         # unknown
+        manifest)
+    assert [c["slug"] for c in unknown] == ["ghost-doc"]
+    assert [(c["slug"], c["year"]) for c in mismatch] == [
+        ("acme-contract-v2", "2099"), ("acme-contract-v2", "n.d.")]
+    assert [(c["slug"], c["year"]) for c in unchecked] == [("board-memo", "2020")]
+    assert len(known) == 2
+
+
+def test_kb_manifest_first_wins_and_duplicates_recorded(tmp_path):
+    # FE9: slice_local.jsonl is passed before inherited_corpus.jsonl — the
+    # child run's local entry must beat an inherited parent duplicate, and
+    # the duplicate slug must be recorded.
+    p1 = tmp_path / "slice_local.jsonl"
+    p1.write_text(json.dumps({"kb_slug": "memo", "year": 2024}) + "\n",
+                  encoding="utf-8")
+    p2 = tmp_path / "inherited_corpus.jsonl"
+    p2.write_text(json.dumps({"kb_slug": "memo", "year": 1999}) + "\n",
+                  encoding="utf-8")
+    manifest, duplicates = vc.load_kb_manifest([p1, p2])
+    assert manifest["memo"]["year"] == 2024
+    assert duplicates == ["memo"]
+
+
+def test_pre1800_malformed_cite_is_still_flagged():
+    assert vc.find_unparseable_cites("x [Archive note, 1776; analysis] y")
+
+
+def test_fail_on_exit_codes(tmp_path):
+    import subprocess
+    md = tmp_path / "sec.md"
+    md.write_text("A claim [kb:ghost, 2020] and junk [FAO backgrounder thing, 2018; x].")
+    base = [sys.executable, str(ROOT / "scripts" / "verify_citations.py"), str(md),
+            "--output", str(tmp_path / "r.md")]
+    env_ok = subprocess.run(base, capture_output=True, text=True, cwd=str(ROOT))
+    assert env_ok.returncode == 0          # default behavior unchanged
+    strict = subprocess.run(base + ["--fail-on", "kb-unknown,unparseable"],
+                            capture_output=True, text=True, cwd=str(ROOT))
+    assert strict.returncode == 1
+    report = json.loads((tmp_path / "r.json").read_text())
+    assert report["kb_unknown"] and report["unparseable_cites"]
+    assert report["kb_duplicate_slugs"] == []
+
+
+def test_fail_on_unknown_class_is_usage_error(tmp_path):
+    # C2: an unrecognized --fail-on class is a usage error (exit 2) BEFORE
+    # any network or report work; valid classes are named on stderr.
+    import subprocess
+    md = tmp_path / "sec.md"
+    md.write_text("plain prose, no citations")
+    r = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "verify_citations.py"), str(md),
+         "--output", str(tmp_path / "r.md"), "--fail-on", "kb_unknown"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    assert r.returncode == 2
+    assert "kb-unknown" in r.stderr and "unparseable" in r.stderr
+    assert not (tmp_path / "r.md").exists()   # exited before report work
+
+def test_export_and_verifier_kb_regexes_are_byte_identical():
+    from scripts import export
+    assert export.KB_CITE_RE.pattern == vc.KB_CITE_RE.pattern
+
+
+def test_existing_inline_cite_regex_is_byte_pinned():
+    # Lens: INLINE_CITE_RE must remain byte-identical in BOTH files AND
+    # unchanged from its pre-change form. This literal was generated by running
+    # `python3 -c "from scripts import verify_citations as v;
+    #  print(repr(v.INLINE_CITE_RE.pattern))"` before any Task 5 changes;
+    # if either file's copy drifts, this fails.
+    from scripts import export
+    expected = "[\\[\\(]\\s*(?:(?P<domain>[a-z0-9-]+(?:\\.[a-z0-9-]+)+)|(?P<author>(?:[A-Za-z][A-Za-z\\.\\-' ]{0,80}?)(?:\\s+(?:et\\s+al\\.?|&\\s+(?:[A-Za-z][A-Za-z\\.\\-' ]{0,80}?)|and\\s+(?:[A-Za-z][A-Za-z\\.\\-' ]{0,80}?)))?)),?\\s*(?P<year>\\d{4}[a-z]?|n\\.d\\.)\\s*[\\]\\)]"
+    assert vc.INLINE_CITE_RE.pattern == expected
+    assert export.INLINE_CITE_RE.pattern == expected
+
+
+def test_export_extracts_kb_claims(tmp_path):
+    from scripts import export
+    sec = tmp_path / "sections"; sec.mkdir()
+    (sec / "a.md").write_text(
+        "The gross fee is US$400,000 [kb:acme-contract-v2, 2024]. "
+        "Other prose [Smith, 2020] here.")
+    claims = list(export.extract_claims(sec))
+    kb = [c for row in claims for c in row["citations"] if c["kind"] == "kb"]
+    assert kb == [{"author": "kb:acme-contract-v2", "year": "2024", "kind": "kb"}]
+    academic = [c for row in claims for c in row["citations"] if c["kind"] == "academic"]
+    assert academic  # existing extraction unchanged

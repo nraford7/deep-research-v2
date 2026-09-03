@@ -324,9 +324,99 @@ def _collect_sources(payload):
     return sources
 
 
-def _write_answer(path, question, answer, sources):
+def _collect_evidence(payload):
+    """Gather the textual EVIDENCE in the response: results[].highlights
+    (type-guarded: must be a list), results[].text when a str, plus strings
+    inside output.grounding that sit under evidence-text keys (same set as
+    sweep_numbers) — NEVER urls/ids/titles, whose numeric fragments would
+    falsely suppress UNVERIFIED marks (S2/FE1)."""
+    # Grounding keys whose values are EVIDENCE TEXT — mirror of
+    # sweep_numbers._EVIDENCE_KEYS.
+    evidence_keys = {"text", "highlights", "snippet", "snippets", "quote",
+                     "excerpt", "content", "citation"}
+    evidence = []
+    if not isinstance(payload, dict):
+        return evidence
+    for raw in payload.get("results") or []:
+        if not isinstance(raw, dict):
+            continue
+        highlights = raw.get("highlights")
+        snippets = ([str(h) for h in highlights if h]
+                    if isinstance(highlights, list) else [])
+        text = raw.get("text")
+        if isinstance(text, str) and text.strip():
+            snippets.append(text.strip())
+        if snippets:
+            evidence.append({"url": (raw.get("url") or "").strip(), "snippets": snippets})
+    output = payload.get("output")
+    if isinstance(output, dict) and output.get("grounding") is not None:
+        def _strings(node, under_evidence_key):
+            if isinstance(node, str):
+                if under_evidence_key and node.strip():
+                    yield node.strip()
+            elif isinstance(node, dict):
+                for k, v in node.items():
+                    yield from _strings(v, str(k).lower() in evidence_keys)
+            elif isinstance(node, list):
+                for v in node:
+                    yield from _strings(v, under_evidence_key)
+        snippets = list(_strings(output["grounding"], False))
+        if snippets:
+            evidence.append({"url": "(grounding)", "snippets": snippets})
+    return evidence
+
+
+UNVERIFIED_MARK = "[UNVERIFIED — not in retrieved evidence]"
+
+
+def _mark_unverified(answer, evidence_text):
+    """Prefix every sentence containing ANY quantity the evidence text does
+    not support — one fabricated number marks the sentence even when its
+    neighbors are supported. Empty evidence ⇒ every quantity sentence is
+    marked (fail-safe, not fail-open).
+
+    Markdown structure is preserved (S3): leading whitespace and a list
+    marker ("- ", "* ", "1. ") are peeled BEFORE sentence work and
+    reattached after, so nesting survives, the ordinal of a numbered item is
+    never a claim, and the mark lands after the marker, before the
+    sentence."""
+    import re as _re
+    from scripts import numkeys
+    from scripts.lint_background import _split_sentences
+    list_prefix = _re.compile(r"^(\s*)((?:[-*+]|\d+[.)])\s+)?")
+    norm = numkeys.normalize_haystack(evidence_text or "")
+    out_lines = []
+    for line in answer.split("\n"):
+        if not line.strip():
+            out_lines.append(line)
+            continue
+        m = list_prefix.match(line)
+        indent, marker = m.group(1), m.group(2) or ""
+        body = line[m.end():]
+        rebuilt = []
+        for sent in _split_sentences(body):
+            claims = numkeys.extract_claims(numkeys.strip_nonclaims(sent))
+            if claims and (not norm or any(
+                    not numkeys.claim_supported(c, norm) for c in claims)):
+                rebuilt.append(f"{UNVERIFIED_MARK} {sent.strip()}")
+            else:
+                rebuilt.append(sent.strip())
+        out_lines.append(f"{indent}{marker}{' '.join(rebuilt)}")
+    return "\n".join(out_lines)
+
+
+def _write_answer(path, question, answer, sources, evidence):
     lines = [f"# Round-2.5 answer", "", f"**Question:** {question}", "", answer.rstrip(), ""]
-    lines += ["## Sources", ""]
+    lines += ["## Evidence", ""]
+    if evidence:
+        for e in evidence:
+            lines.append(f"- {e['url'] or 'source'}")
+            for s in e["snippets"]:
+                snippet = s if len(s) <= 1500 else s[:1500] + " …[truncated]"
+                lines.append(f"  > {snippet}")
+    else:
+        lines.append("_(no evidence returned)_")
+    lines += ["", "## Sources", ""]
     if sources:
         for url, title in sources:
             lines.append(f"- {title or 'source'} — {url}")
@@ -371,9 +461,33 @@ def run_question(idx, bucket, question, session, api_key, ledger, round25_dir):
             actual = None
     ledger.reconcile(entry, actual)
 
-    answer = _extract_answer(payload)
-    sources = _collect_sources(payload)
-    _write_answer(answer_path, question, answer, sources)
+    # FAIL-OPEN (S4): the money is already reconciled — an unexpected
+    # exception in evidence processing must never kill the run. Fall back to
+    # writing the answer unmarked-but-flagged and still count it answered.
+    try:
+        answer = _extract_answer(payload)
+        sources = _collect_sources(payload)
+        evidence = _collect_evidence(payload)
+        (round25_dir / f"grounding_{idx:02d}.json").write_text(
+            json.dumps({"results": payload.get("results"),
+                        "grounding": (payload.get("output") or {}).get("grounding")
+                        if isinstance(payload.get("output"), dict) else None},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        evidence_text = "\n".join(s for e in evidence for s in e["snippets"])
+        answer = _mark_unverified(answer, evidence_text)
+        _write_answer(answer_path, question, answer, sources, evidence)
+    except Exception as exc:  # noqa: BLE001 — post-payment fail-open by design
+        print(f"  ⚠ question {idx} ({bucket}) evidence processing failed "
+              f"({type(exc).__name__}: {exc}) — answer written unverified",
+              file=sys.stderr)
+        try:
+            raw_answer = _extract_answer(payload)
+        except Exception:  # noqa: BLE001 — pathological payloads included
+            raw_answer = ""
+        _write_answer(answer_path, question,
+                      "[UNVERIFIED — evidence processing failed]\n" + raw_answer,
+                      [], [])
     return True
 
 

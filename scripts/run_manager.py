@@ -132,6 +132,7 @@ MANAGED_HELPERS: dict[str, tuple[str, str, frozenset[str]]] = {
     "citation-chase": ("scripts.managed_helpers", "managed_citation_chase", frozenset({"topic", "max_seeds", "max_candidates", "forward", "openalex_call_ceiling"})),
     "coverage-audit": ("scripts.managed_helpers", "managed_coverage_audit", frozenset({"topic", "max_audit_rounds", "audit_usd", "use_matrix", "current_year"})),
     "deepen-questions": ("scripts.managed_helpers", "managed_deepen", frozenset({"round2_file", "single_question", "bucket", "max_retrieval_usd"})),
+    "ingest-local": ("scripts.managed_helpers", "managed_ingest_local", frozenset({"files", "title", "slug", "year"})),
 }
 
 
